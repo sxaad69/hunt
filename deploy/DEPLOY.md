@@ -37,3 +37,9 @@ Campaign clock: `/home/hunt/hunt/state/run_meta.json` (7-day window)
 - Zero inbound ports — access only via SSM/EICE (AWS IAM-gated)
 - Secrets in SSM SecureString; instance role limited to `/hunt/*` params + campaign S3 bucket
 - Wallet key: never stored (paper mode) — when going live, use a dedicated dust wallet + Secrets Manager
+
+## Monitoring identity (IAM)
+- Scoped IAM user `hunt-deploy`: only EC2 Instance Connect (SSH tunnel) + instance describe.
+- Keys in `~/.aws/credentials` profile `[hunt-deploy]` — **never expire**, no `aws login` needed.
+- Cannot read Parameter Store secrets, cannot touch trading or wallets.
+- Revoke anytime: `aws iam delete-access-key --user-name hunt-deploy --access-key-id <key>` (root).
