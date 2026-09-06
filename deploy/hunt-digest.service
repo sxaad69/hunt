@@ -1,0 +1,9 @@
+[Unit]
+Description=Hunt daily digest (Telegram)
+
+[Service]
+Type=oneshot
+User=hunt
+WorkingDirectory=/home/hunt/hunt
+ExecStart=/home/hunt/hunt/.venv/bin/python -m hunt.notify.digest
+Environment=PYTHONUNBUFFERED=1
