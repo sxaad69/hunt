@@ -1,43 +1,39 @@
-# Hunt bot — AWS deployment (t3.micro / Ubuntu 24.04)
+# Hunt — AWS deployment (t3.micro, eu-central-1 Frankfurt)
 
-## 1. Create the instance
-- Ubuntu Server 24.04 LTS, t3.micro (or t3.small if free-tier allows)
-- Security group: inbound **port 22 only**, restricted to your IP. Everything else outbound.
-- 8GB gp3 root volume is fine.
+**Live instance:** `i-0d567877feac30c13` · Ubuntu 24.04 · eu-central-1b · IP 172.31.38.120 (private only)
+**Access:** SSH via EC2 Instance Connect Endpoint `eice-0abfa9d16fb346813` — key at `~/Documents/aws/hunt`
+**Service:** systemd `hunt.service` (Restart=always) — paper campaign, 7-day window
+**Digest:** systemd `hunt-digest.timer` → Telegram daily 08:00 UTC
 
-## 2. One-time setup (SSH in)
+## Connect
 ```bash
-sudo apt update && sudo apt install -y python3-venv python3-pip git
-sudo adduser --disabled-password --gecos "" hunt
-sudo -iu hunt
-git clone <repo-url> hunt && cd hunt
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env && nano .env   # fill keys (NEVER commit this)
-mkdir -p logs state hunt/data
+ssh -i ~/Documents/aws/hunt \
+  -o ProxyCommand="aws --region eu-central-1 ec2-instance-connect open-tunnel --instance-id i-0d567877feac30c13" \
+  ubuntu@172.31.38.120
 ```
+(Requires a valid `aws login` session — grants expire ~15 min, re-run `aws login` when needed.)
 
-## 3. Install the service
-```bash
-sudo cp deploy/hunt.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now hunt
-systemctl status hunt          # should be active
-journalctl -u hunt -f          # live logs
+## Deploy flow (code changes)
 ```
-
-## 4. Daily digest (server-side, Telegram)
-```bash
-sudo cp deploy/hunt-digest.* /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now hunt-digest.timer
+# on Mac
+git add -A && git commit -m "..." && git push
+# on AWS (via SSH)
+sudo -iu hunt bash -c 'cd /home/hunt/hunt && git pull'
+sudo systemctl restart hunt
 ```
+Heavy files (DB, logs, state) NEVER go through git — DB backups live in S3
+(`hunt-state-362457597397-euc1`), secrets in SSM Parameter Store (`/hunt/*`, SecureString).
 
-## 5. Cutover rules
-- **ONE live instance** — stop the Mac run before enabling the AWS one (`pkill -f hunt.paper.run` locally, disarm local watchdog: `pkill -f watchdog.sh`).
-- Copy `state/run_meta.json` to preserve the campaign clock, or start a fresh window.
-- Backtest / heavy analysis stays on the Mac (t3.micro CPU credits are for the hunt only).
+## Service
+```
+systemctl status hunt        # active = hunting
+journalctl -u hunt -f        # live logs
+tail -f /home/hunt/hunt/logs/hunt_$(date +%F).log
+```
+Config: `/home/hunt/hunt/.env` (chmod 600) · DB: `/home/hunt/hunt/hunt/data/hunt.sqlite3`
+Campaign clock: `/home/hunt/hunt/state/run_meta.json` (7-day window)
 
-## 6. Key hygiene (before dust-live)
-- `.env` is chmod 600, owned by `hunt` user.
-- When real money loads: dedicated wallet with only the operating balance; consider AWS Secrets Manager over plaintext.
-- SSH: key-only, password auth disabled (`PasswordAuthentication no` in sshd_config).
+## Security posture
+- Zero inbound ports — access only via SSM/EICE (AWS IAM-gated)
+- Secrets in SSM SecureString; instance role limited to `/hunt/*` params + campaign S3 bucket
+- Wallet key: never stored (paper mode) — when going live, use a dedicated dust wallet + Secrets Manager
