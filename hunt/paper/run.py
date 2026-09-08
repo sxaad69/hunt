@@ -65,13 +65,16 @@ def survival_filter(coin: dict) -> tuple[bool, str]:
             # let it pass to model, but ensure it doesn't get rejected for no_socials
             pass
     except: pass
-    # 2d. MCAP CEILING: graduated giants slip through the floor gates but are
-    # not the strategy (0/2 wins in the 4h baseline, pure noise)
-    try:
-        mc = float(coin.get("market_cap") or 0)
-        if mc > MCAP_CEILING_SOL:
-            return False, f"mcap_ceiling_{mc:.0f}"
-    except: pass
+    # 2d. MCAP CEILING: DISABLED 2026-09-08 — reopening species-B to chase
+    # USUR-class moonshots again (see AGENTS.md). Previously a hard veto:
+    #   try:
+    #       mc = float(coin.get("market_cap") or 0)
+    #       if mc > MCAP_CEILING_SOL:
+    #           return False, f"mcap_ceiling_{mc:.0f}"
+    #   except: pass
+    # KNOWN RISK: species-B round-dumps slip past -20% SL -> full-stake losses
+    # (6 full-stake SLs on 09-05). Measure SL-death rate (survival-agnostic)
+    # before trusting this; one evidence-backed step, log in daily digest.
     # 2e. distribution/bundle gates from in-memory-coin intel (fields provided
     # by the decision-time enrichment; absent for poll-path coins -> no veto)
     try:
@@ -147,7 +150,7 @@ TIER_TRIGGERS = [0.40, 0.60]
 TIER_FRACS = [0.50, 0.25]
 # (peak-multiple floor, trail-from-peak) — first matching row wins
 MOON_TRAIL_LADDER = [(0.0, 0.30), (3.0, 0.20), (10.0, 0.12), (50.0, 0.08)]
-MCAP_CEILING_SOL = 3000.0  # graduated giants are not the strategy
+MCAP_CEILING_SOL = 3000.0  # unused (ceiling commented 2026-09-08 to reopen species-B moonshot hunting)
 
 SOL_USD = 150.0  # last-resort fallback; normally FEED.sol_usd (45s refresh)
 

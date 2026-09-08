@@ -33,14 +33,19 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Strategy (current, frozen until evidence says otherwise)
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
-- **Gates**: dust floor ≥50 SOL · ceiling ≤3000 SOL · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
+- **Gates**: dust floor ≥50 SOL · ceiling DISABLED 2026-09-08 (was ≤3000) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius curve ticks (exact, ~0–2% vs pump.fun indexer); GeckoTerminal fallback for graduated tokens
-- **Species-B verdict (closed Sep 2026, evidence-backed)**: real, repeatable, bounded upside (post-grad max
-  ~3.8x, 0/40 underwater on audit day) but NOT capturable — the birth→listing ramp is atomic (ROBIN replay:
-  6.1k→92k SOL in one block), so no pre-peak entry exists, and AMM entry/exits carry slippage that eats the
-  single-digit-x edge. Treat as permanently excluded from the playable set. Preserved option: ONLY the
-  late-crosser class (<20k SOL @ 90s) might clear slippage IF we ever add real AMM execution — do not build.
+- **Species-B REOPENED 2026-09-08 (decision)**: ceiling gate commented (`run.py`)
+  so USUR-class moonshots are huntable again — but with eyes open. Evidence on
+  both sides: (1) the post-grad tail is REAL (USUR: 151,926 SOL @90s, +50.31
+  SOL in 9 min; specb audit 27/40 continued, 0/40 underwater); (2) the class
+  median is a dump-factory (6 full-stake SLs 09-05, ex-USUR avg −0.0156/slot)
+  and the birth→listing ramp is atomic (ROBIN replay) so entries are at the
+  post-grad plateau. TRADE-OFF ACCEPTED. MUST next measure the survival-agnostic
+  SL-death rate (species-B ceiling rejects incl. dead) before trusting this.
+  The Sep-2026 "permanently excluded" verdict is hereby superseded; do not treat
+  as frozen until that measurement is in and logged.
 
 ## Known traps — read before changing anything
 - `SL_PCT` is ALREADY percent. The −2000% bug (multiplying by 100) made the stop-loss unreachable for months.
@@ -79,5 +84,6 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Current campaign state (update as things change)
 - 7-day paper campaign on AWS, started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
-- Two runner species: A = classic curve rides (our edge), B = instant-mega launches (closed: see species-B
-  verdict above — unplayable after atomic ramp + slippage, audit tool `specb_mcap_audit.py` kept as monitor).
+- Two runner species: A = classic curve rides (our edge), B = instant-mega launches (REOPENED 2026-09-08:
+  ceiling commented to chase USUR-class tails again — see species-B decision above; `specb_mcap_audit.py`
+  kept as monitor; next step = survival-agnostic SL-death measurement).
