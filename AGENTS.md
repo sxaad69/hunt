@@ -36,6 +36,11 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Gates**: dust floor ≥50 SOL · ceiling ≤3000 SOL · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius curve ticks (exact, ~0–2% vs pump.fun indexer); GeckoTerminal fallback for graduated tokens
+- **Species-B verdict (closed Sep 2026, evidence-backed)**: real, repeatable, bounded upside (post-grad max
+  ~3.8x, 0/40 underwater on audit day) but NOT capturable — the birth→listing ramp is atomic (ROBIN replay:
+  6.1k→92k SOL in one block), so no pre-peak entry exists, and AMM entry/exits carry slippage that eats the
+  single-digit-x edge. Treat as permanently excluded from the playable set. Preserved option: ONLY the
+  late-crosser class (<20k SOL @ 90s) might clear slippage IF we ever add real AMM execution — do not build.
 
 ## Known traps — read before changing anything
 - `SL_PCT` is ALREADY percent. The −2000% bug (multiplying by 100) made the stop-loss unreachable for months.
@@ -55,6 +60,16 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
   `cd /home/hunt/hunt && sudo -u hunt .venv/bin/python /tmp/top_runners.py 24`
 - Methodology matters: a "missed moonshot" = seen at birth and dust-rejected. Giants first-seen above the
   ceiling are not misses. Zero gate-misses is the KPI (verified across 100+ runners so far).
+- `specb_mcap_audit.py [N] [hours] [min_x]` — specimen-B "real picture" monitor. Target list = pump.fun's
+  OWN ranked gainers (NOT the decisions DB — the DB only shows what we saw; the gainer list is the
+  population we'd actually enter). For each target: `fold = current SOL mcap / DB 90s snapshot` (the
+  listing/entry point). Sorted by fold → buckets: <0.2 dusted · 0.2–0.8 faded · 0.8–1.2 flat · >1.2
+  continued · ≥5 ran away. Deliberately mcap-only (no on-chain replay; ~0 extra RPC — current mcap
+  already comes with the /coins fetch). Run on AWS:
+  `cd /home/hunt/hunt && sudo -u hunt .venv/bin/python audit/specb_mcap_audit.py 40 24 10`
+- Caveat (by design): gainer-ranked = survivor-biased — dusted coins fall off rankings, so the SL-death
+  class is INVISIBLE to this script; it sizes the upside, not the downside. Current mcap is also a lower
+  bound (peak-then-dump missed).
 
 ## Monitoring
 - ZCode automation every 2h: AWS health + funnel + PnL via SSH; Mac standby check; auto-fix clear bugs.
@@ -64,4 +79,5 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Current campaign state (update as things change)
 - 7-day paper campaign on AWS, started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
-- Two runner species: A = classic curve rides (our edge), B = instant-mega launches (observed/logged, not playable yet).
+- Two runner species: A = classic curve rides (our edge), B = instant-mega launches (closed: see species-B
+  verdict above — unplayable after atomic ramp + slippage, audit tool `specb_mcap_audit.py` kept as monitor).
