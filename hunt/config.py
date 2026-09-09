@@ -129,7 +129,9 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def jup_base(self) -> str:
-        return "https://quote-api.jup.ag/v6"
+        # quote-api.jup.ag/v6 is retired (no DNS records as of 2026-09-09);
+        # the current Swap API lives on api.jup.ag/swap/v1.
+        return "https://api.jup.ag/swap/v1"
 
 
 @lru_cache
