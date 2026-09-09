@@ -84,22 +84,23 @@ class LiveExecutor:
             lamports = (await rpc.get_balance(self.kp.pubkey())).value
             return lamports / 1e9
 
+    async def _raw_rpc(self, method: str, params: list) -> dict | None:
+        try:
+            r = await self.http.post(self.rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+            j = r.json()
+            return j.get("result") if j.get("error") is None else None
+        except Exception as e:
+            logger.debug("raw rpc {} failed: {}", method, e)
+            return None
+
     async def _token_balance_raw(self, mint: str, owner: Pubkey | None = None) -> int:
-        from solana.rpc.async_api import AsyncClient
-        from solana.rpc.types import TokenAccountOpts
         owner = owner or self.kp.pubkey()
-        async with AsyncClient(self.s.rpc_http) as rpc:
-            resp = await rpc.get_token_accounts_by_owner(
-                owner, TokenAccountOpts(mint=mint, encoding="jsonParsed")
-            )
-        for item in (resp.value or []):
-            data = item.account.data
-            try:
-                amt = data.parsed["info"]["tokenAmount"]["amount"]
-                return int(amt)
-            except Exception:
-                if hasattr(data, "amount"):
-                    return int(data.amount)
+        result = await self._raw_rpc("getTokenAccountsByOwner",
+                                     [str(owner), {"mint": mint, "encoding": "jsonParsed"}])
+        for acc in (result or {}).get("value") or []:
+            parsed = acc.get("account", {}).get("data", {}).get("parsed")
+            if parsed and parsed.get("info", {}).get("tokenAmount") is not None:
+                return int(parsed["info"]["tokenAmount"]["amount"])
         return 0
 
     async def _token_decimals(self, mint: str) -> int:
