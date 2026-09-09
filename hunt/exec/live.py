@@ -319,6 +319,41 @@ async def _cli_smoke(mint: str, size_sol: float) -> None:
     print("SMOKE OK")
 
 
+async def _cli_send(to_address: str, amount_sol: float, send_all: bool) -> None:
+    """Withdraw SOL from the bot wallet to ANY Solana address. amount_sol=0 +
+    --all sends the full balance (minus fee). Prints the tx signature and the
+    remaining balance. This is the operator's money-out path."""
+    ex = LiveExecutor()
+    if not ex.kp:
+        raise SystemExit("HUNT_WALLET_PRIVATE_KEY not set")
+    from solders.pubkey import Pubkey
+    to = Pubkey.from_string(to_address)
+    bal_lamports = int(await ex.balance_sol() * 1e9)
+    fee_lamports = 5000
+    if send_all:
+        lamports = bal_lamports - fee_lamports
+    else:
+        lamports = int(amount_sol * 1e9)
+    if lamports <= 0 or lamports > bal_lamports - fee_lamports:
+        raise SystemExit(f"invalid amount: bal={bal_lamports/1e9:.6f} SOL")
+    from solders.system_program import TransferParams, transfer
+    from solders.message import Message
+    from solders.transaction import Transaction
+    from hunt.exec.pumpfun import fetch_latest_blockhash
+    blockhash = await fetch_latest_blockhash(ex.rpc, http_client=ex.http)
+    ix = transfer(TransferParams(from_pubkey=ex.kp.pubkey(), to_pubkey=to, lamports=lamports))
+    msg = Message.new_with_blockhash(ix, ex.kp.pubkey(), blockhash)
+    tx = Transaction([ex.kp], msg, blockhash)
+    from solana.rpc.async_api import AsyncClient
+    async with AsyncClient(ex.rpc) as rpc:
+        resp = await rpc.send_transaction(tx)
+        sig = str(resp.value)
+        await rpc.confirm_transaction(resp.value)
+    print(f"sent {lamports/1e9:.6f} SOL -> {to_address}")
+    print(f"signature: {sig}")
+    print(f"remaining balance: {await ex.balance_sol():.6f} SOL")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="hunt.exec.live")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -326,11 +361,17 @@ def main() -> None:
     s = sub.add_parser("smoke")
     s.add_argument("mint")
     s.add_argument("--size-sol", type=float, default=0.001)
+    w = sub.add_parser("send")
+    w.add_argument("to")
+    w.add_argument("amount_sol", type=float, nargs="?", default=0.0)
+    w.add_argument("--all", action="store_true", help="send full balance minus fee")
     args = p.parse_args()
     if args.cmd == "balance":
         asyncio.run(_cli_balance())
-    else:
+    elif args.cmd == "smoke":
         asyncio.run(_cli_smoke(args.mint, args.size_sol))
+    else:
+        asyncio.run(_cli_send(args.to, args.amount_sol, args.all))
 
 
 if __name__ == "__main__":
