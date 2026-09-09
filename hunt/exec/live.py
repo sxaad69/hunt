@@ -114,15 +114,24 @@ class LiveExecutor:
     async def _sign_send_instructions(self, instructions: list, blockhash: str = "") -> Optional[str]:
         from solders.hash import Hash
         from solana.rpc.async_api import AsyncClient
-        if not blockhash:
-            h = await fetch_latest_blockhash(self.rpc, http_client=self.http)
-            blockhash = str(h)
-        msg = build_message(self.kp.pubkey(), instructions, Hash.from_string(blockhash))
-        tx = VersionedTransaction(msg, [self.kp])
-        async with AsyncClient(self.rpc) as rpc:
-            resp = await rpc.send_raw_transaction(bytes(tx))
-            await rpc.confirm_transaction(resp.value)
-            return str(resp.value)
+        last_err = None
+        for attempt in range(2):
+            try:
+                if not blockhash or attempt > 0:
+                    h = await fetch_latest_blockhash(self.rpc, http_client=self.http)
+                    blockhash = str(h)
+                msg = build_message(self.kp.pubkey(), instructions, Hash.from_string(blockhash))
+                tx = VersionedTransaction(msg, [self.kp])
+                async with AsyncClient(self.rpc) as rpc:
+                    resp = await rpc.send_raw_transaction(bytes(tx))
+                    await rpc.confirm_transaction(resp.value)
+                    return str(resp.value)
+            except Exception as e:
+                last_err = e
+                logger.warning("sign/send attempt {} failed: {}", attempt + 1, e)
+                await asyncio.sleep(1.0)
+        logger.error("sign/send failed after retries: {}", last_err)
+        return None
 
     # -------------------------------------------------------------- parsing
     async def _snapshot(self, mint: str) -> "tuple[int, int]":
