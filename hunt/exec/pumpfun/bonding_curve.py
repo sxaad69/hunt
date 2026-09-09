@@ -1,10 +1,18 @@
 """
-PumpFun bonding curve v2 — buy/sell instructions and on-chain state reading.
+PumpFun bonding curve — buy/sell instructions and on-chain state reading.
 
-Program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+Program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P (legacy curve ABI)
 
-BUY:  16 accounts (live order: creator_vault [8], token_program [9], fee_config [12], fee_program [13], two fixed trailing accounts)
-SELL: 16 accounts (same live order as buy)
+BUY:  18 accounts, exact live order (verified against an on-chain CPI):
+      global, fee_recipient, mint, bonding_curve, abc, auc, user, system_program,
+      token_program [8], creator_vault [9], event_authority, program,
+      global_volume_accumulator [12], user_volume_accumulator [13],
+      fee_config [14], fee_program [15], bonding_curve_v2 [16], trailing [17].
+
+SELL: 16 accounts, exact live order (verified against an on-chain CPI):
+      global, fee_recipient, mint, bonding_curve, abc, auc, user, system_program,
+      creator_vault [8], token_program [9], event_authority, program,
+      fee_config [12], fee_program [13], trailing-14 [14], trailing-15 [15].
 """
 
 from __future__ import annotations
@@ -20,7 +28,6 @@ from solders.pubkey import Pubkey
 from .constants import (
     GLOBAL_FEE_RECIPIENT_OFFSET,
     PUMP_BUY_DISCRIMINATOR,
-    PUMP_CURVE_TRAIL_14,
     PUMP_CURVE_TRAIL_15,
     PUMP_FEE_PROGRAM,
     PUMP_FUN_EVENT_AUTHORITY,
@@ -256,12 +263,13 @@ def build_buy_instruction(
     token_program: Pubkey = TOKEN_PROGRAM,
 ) -> Instruction:
     """
-    Build the PumpFun curve BUY instruction (16 accounts, live-program layout).
+    Build the PumpFun curve BUY instruction (18 accounts, live-program layout).
 
-    Order captured from a successful on-chain CPI:
+    Exact order captured from a successful live buy CPI:
     global, fee_recipient, mint, bonding_curve, abc, auc, user, system_program,
-    creator_vault, token_program, event_authority, program, fee_config,
-    fee_program, trailing-14, trailing-15.
+    token_program [8], creator_vault [9], event_authority, program,
+    global_volume_accumulator [12], user_volume_accumulator(user) [13],
+    fee_config [14], fee_program [15], bonding_curve_v2 [16], trail-15 [17].
 
     Args:
         user: Buyer's wallet (signer).
@@ -280,6 +288,9 @@ def build_buy_instruction(
     associated_bonding_curve = get_associated_token_address(bonding_curve, token_mint, token_program)
     creator_vault = get_creator_vault_pda(creator)
     fee_config = get_fee_config_pda()
+    gva = get_global_volume_accumulator_pda()
+    uva = get_user_volume_accumulator_pda(user)
+    curve_v2 = get_bonding_curve_v2_pda(token_mint)
 
     data = (
         PUMP_BUY_DISCRIMINATOR
@@ -297,13 +308,15 @@ def build_buy_instruction(
         AccountMeta(associated_user, is_signer=False, is_writable=True),
         AccountMeta(user, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(creator_vault, is_signer=False, is_writable=True),
         AccountMeta(token_program, is_signer=False, is_writable=False),
+        AccountMeta(creator_vault, is_signer=False, is_writable=True),
         AccountMeta(PUMP_FUN_EVENT_AUTHORITY, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FUN_PROGRAM, is_signer=False, is_writable=False),
+        AccountMeta(gva, is_signer=False, is_writable=True),
+        AccountMeta(uva, is_signer=False, is_writable=True),
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(PUMP_CURVE_TRAIL_14, is_signer=False, is_writable=False),
+        AccountMeta(curve_v2, is_signer=False, is_writable=True),
         AccountMeta(PUMP_CURVE_TRAIL_15, is_signer=False, is_writable=False),
     ]
 
@@ -323,9 +336,10 @@ def build_sell_instruction(
     """
     Build the PumpFun curve SELL instruction (16 accounts, live-program layout).
 
-    Mirrors the live buy layout: creator_vault [8], token_program [9], then
-    event_authority, program, fee_config, fee_program + the two trailing
-    fixed accounts.
+    Exact order captured from a successful live sell CPI:
+    global, fee_recipient, mint, bonding_curve, abc, auc, user, system_program,
+    creator_vault [8], token_program [9], event_authority, program,
+    fee_config [12], fee_program [13], trail-14 [14], trail-15 [15].
 
     Args:
         user: Seller's wallet (signer).
