@@ -3,8 +3,8 @@ PumpFun bonding curve v2 — buy/sell instructions and on-chain state reading.
 
 Program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
 
-BUY:  16 accounts
-SELL: 14 accounts (creator_vault and token_program are SWAPPED vs buy)
+BUY:  17 accounts (last = optional quote_mint, WSOL for SOL-paired)
+SELL: 15 accounts (creator_vault and token_program are SWAPPED vs buy; last = optional quote_mint, WSOL for SOL-paired)
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from .constants import (
     PUMP_FUN_GLOBAL,
     PUMP_FUN_PROGRAM,
     PUMP_SELL_DISCRIMINATOR,
+    SOL_MINT,
     SYSTEM_PROGRAM,
     TOKEN_PROGRAM,
 )
@@ -252,7 +253,7 @@ def build_buy_instruction(
     token_program: Pubkey = TOKEN_PROGRAM,
 ) -> Instruction:
     """
-    Build the PumpFun v2 BUY instruction (16 accounts).
+    Build the PumpFun v2 BUY instruction (17 accounts; trailing = optional quote_mint).
 
     Args:
         user: Buyer's wallet (signer).
@@ -298,7 +299,7 @@ def build_buy_instruction(
         AccountMeta(user_vol, is_signer=False, is_writable=True),
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(get_bonding_curve_v2_pda(token_mint), is_signer=False, is_writable=False),
+        AccountMeta(SOL_MINT, is_signer=False, is_writable=False),
     ]
 
     return Instruction(PUMP_FUN_PROGRAM, data, accounts)
@@ -315,7 +316,7 @@ def build_sell_instruction(
     token_program: Pubkey = TOKEN_PROGRAM,
 ) -> Instruction:
     """
-    Build the PumpFun v2 SELL instruction (14 accounts).
+    Build the PumpFun v2 SELL instruction (15 accounts; trailing = optional quote_mint).
 
     NOTE: creator_vault [8] and token_program [9] are SWAPPED vs buy!
 
@@ -358,7 +359,7 @@ def build_sell_instruction(
         AccountMeta(PUMP_FUN_PROGRAM, is_signer=False, is_writable=False),
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(get_bonding_curve_v2_pda(token_mint), is_signer=False, is_writable=False),
+        AccountMeta(SOL_MINT, is_signer=False, is_writable=False),
     ]
 
     return Instruction(PUMP_FUN_PROGRAM, data, accounts)

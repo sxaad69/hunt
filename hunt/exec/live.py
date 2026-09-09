@@ -118,8 +118,9 @@ class LiveExecutor:
         for attempt in range(2):
             try:
                 if not blockhash or attempt > 0:
-                    h = await fetch_latest_blockhash(self.rpc, http_client=self.http)
-                    blockhash = str(h)
+                    async with AsyncClient(self.rpc) as rpc:
+                        h = await rpc.get_latest_blockhash()
+                    blockhash = str(h.value.blockhash)
                 msg = build_message(self.kp.pubkey(), instructions, Hash.from_string(blockhash))
                 tx = VersionedTransaction(msg, [self.kp])
                 async with AsyncClient(self.rpc) as rpc:
