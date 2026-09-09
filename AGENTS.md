@@ -37,15 +37,23 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius curve ticks (exact, ~0–2% vs pump.fun indexer); GeckoTerminal fallback for graduated tokens
 - **Species-B REOPENED 2026-09-08 (decision)**: ceiling gate commented (`run.py`)
-  so USUR-class moonshots are huntable again — but with eyes open. Evidence on
-  both sides: (1) the post-grad tail is REAL (USUR: 151,926 SOL @90s, +50.31
-  SOL in 9 min; specb audit 27/40 continued, 0/40 underwater); (2) the class
-  median is a dump-factory (6 full-stake SLs 09-05, ex-USUR avg −0.0156/slot)
-  and the birth→listing ramp is atomic (ROBIN replay) so entries are at the
-  post-grad plateau. TRADE-OFF ACCEPTED. MUST next measure the survival-agnostic
-  SL-death rate (species-B ceiling rejects incl. dead) before trusting this.
-  The Sep-2026 "permanently excluded" verdict is hereby superseded; do not treat
-  as frozen until that measurement is in and logged.
+  so USUR-class moonshots are huntable again. Evidence on both sides: (1) the
+  post-grad tail is REAL (USUR: 151,926 SOL @90s, +50.31 SOL in 9 min; specb
+  audit 27/40 continued, 0/40 underwater; **ZDOG 09-09: +4.68 SOL moon_bag_trail
+  from a 13.5k SOL entry**); (2) the class median is a dump-factory (6 full-stake
+  SLs 09-05, ex-USUR avg −0.0156/slot) and the birth→listing ramp is atomic
+  (ROBIN replay) so entries are at the post-grad plateau.
+- **SL-death measurement IN (2026-09-09, `audit/specb_sl_death.py`)**: population =
+  all 802 species-B mints we saw in 48h; sniper/top10 gates still veto 729 (91%),
+  so only **73 are playable**. Of those 73: **dusted (fold<0.2) = 31.5%** ← the
+  AGENTS number, plus 2.7% faded → 34% losing entries; 47.9% flat; **17.8%
+  continued** (fold≥1.2, max 3.90x current). Median fold 0.99. Caveat: current
+  mcap is a lower bound — peak-then-dump AND intraday-tier-before-recovery are
+  both invisible, so 31.5% is a FLOOR on true SL-death and tails like ZDOG's
+  realized +93x don't show in fold buckets. VERDICT: reopen STANDS with eyes
+  open — burn rate ~1/3 of entries, funded by rare heavy tails; ZDOG already
+  funds ~19 SL-deaths. Not frozen; keep monitoring, next refinement = peak-aware
+  (replay) sim only if burn rate rises.
 
 ## Known traps — read before changing anything
 - `SL_PCT` is ALREADY percent. The −2000% bug (multiplying by 100) made the stop-loss unreachable for months.
