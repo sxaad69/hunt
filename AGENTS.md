@@ -54,7 +54,8 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Emergency kill**: `touch hunt/data/kill_live` on AWS → next stops-poll force-closes ALL
   live positions and deletes the file. Restart to resume.
 - **Guardrails**: per-open balance check `size + live_min_balance_sol`, daily-loss cap
-  currently ENV-only (no Telegram `/live` — the deployed service has no control bot).
+  `live_daily_loss_cap_sol` (0.5 SOL/UTC day → auto force-close ALL live + halt new opens),
+  kill-file emergency close (no Telegram `/live` — the deployed service has no control bot).
 - **Deploy**: update `.env` on AWS (`deploy/gen_env.sh` pulls `HUNT_WALLET_PRIVATE_KEY` from
   SSM `/hunt/HUNT_WALLET_PRIVATE_KEY`) → `systemctl restart hunt`. Funding wallet is generated
   ON the instance (`python -m hunt.utils.solana gen-wallet`), never on Mac; the address is

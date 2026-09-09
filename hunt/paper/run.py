@@ -17,6 +17,7 @@ REJECT_FILE2 = Path("hunt/data/paper_rejected.txt")
 PAPER_DB_TABLE = "paper_decisions"
 
 _LIVE_DECIMALS: dict[str, int] = {}
+_LIVE_HALTED = False  # set after hitting the daily loss cap — blocks new live opens
 
 
 def _current_mode() -> str:
@@ -338,6 +339,10 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         mode = _current_mode()
         from hunt.exec.live import get_live_executor
         ex = get_live_executor()
+        if mode == "LIVE" and _LIVE_HALTED:
+            conn.close()
+            _notify(f"⛔ LIVE DAILY LOSS CAP REACHED — no new live opens until restart/reset")
+            return False
         # check existing open
         conn = sqlite3.connect(DB_PATH)
         cur = conn.execute("SELECT 1 FROM positions WHERE mint=? AND mode=? AND status='open' LIMIT 1", (mint, mode))
@@ -625,6 +630,23 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                     _notify("🛑 KILL FILE processed — all LIVE positions closed. Restart to resume.")
             except Exception as e:
                 logger.debug("kill file error {}", e)
+            # daily-loss cap (UTC day): realized live losses beyond the cap => halt
+            try:
+                if _current_mode() == "LIVE" and not _LIVE_HALTED:
+                    import datetime as _dt
+                    day_start = int(_dt.datetime.now(_dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+                    conn = sqlite3.connect(DB_PATH)
+                    lost = conn.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM positions WHERE mode='LIVE' AND status='closed' AND closed_ts>=?", (day_start,)).fetchone()[0]
+                    conn.close()
+                    if float(lost) < -get_settings().live_daily_loss_cap_sol:
+                        _LIVE_HALTED = True
+                        _notify(f"🛑 LIVE DAILY LOSS CAP — {lost:+.3f} SOL today. Force-closing ALL live positions.")
+                        for pos in list(positions):
+                            if pos["mode"] == "LIVE":
+                                await _force_close(pos["id"], pos["mint"], pos["peak_price_usd"] or pos["entry_price_usd"], _sol_usd(), "daily_loss_cap")
+                        positions = [p for p in positions if p["mode"] != "LIVE"]
+            except Exception as e:
+                logger.debug("daily loss cap error {}", e)
             # keep feed subscriptions in sync with open positions (self-healing
             # after reconnects; unsubscribes closed positions automatically)
             if FEED is not None:

@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     dry_run: bool = True
     # LIVE mode guardrails (only read when HUNT_DRY_RUN=false)
     live_min_balance_sol: float = 0.2
+    live_daily_loss_cap_sol: float = 0.5
     kill_file: str = "hunt/data/kill_live"
 
     data_dir: str = "hunt/data"
