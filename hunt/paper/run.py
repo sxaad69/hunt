@@ -604,6 +604,7 @@ async def price_ws_loop(stop_event: asyncio.Event):
 
 
 async def paper_stops_loop(stop_event: asyncio.Event):
+    global _LIVE_HALTED
     # ws is the real-time pricing/exit engine for bonding-curve tokens.
     # This poll is a fallback for mints the ws hasn't ticked (graduated/Raydium),
     # using GeckoTerminal, every 3s.
