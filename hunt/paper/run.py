@@ -383,8 +383,10 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             tokens = r.tokens
             decimals = r.decimals
             _LIVE_DECIMALS[mint] = r.decimals
-            base_usd = price_usd
-            logger.info("LIVE open {} {} @${:.6g} size {} SOL venue={} sig={}", mint[:8], symbol, price_usd, size_sol, r.venue, r.signature)
+            # anchor to the REAL execution price (fill can be far from the 90s
+            # judging snapshot on launch movers — a wrong entry breaks SL/TP/trail)
+            base_usd = (size_sol * sol_usd) / tokens if tokens > 0 else price_usd
+            logger.info("LIVE open {} {} @${:.6g} size {} SOL venue={} sig={}", mint[:8], symbol, base_usd, size_sol, r.venue, r.signature)
         else:
             decimals = 6
             usd_in = size_sol * sol_usd
