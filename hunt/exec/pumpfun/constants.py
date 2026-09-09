@@ -34,6 +34,14 @@ ASSOCIATED_TOKEN_PROGRAM = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25e
 SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
 SOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")
 
+# ── Curve buy/sell trailing fixed accounts (observed on live program) ──────
+# The deployed pump program's legacy buy/sell append two accounts after
+# fee_program. Values captured from a successful on-chain buy CPI.
+PUMP_CURVE_TRAIL_14 = Pubkey.from_string("4Rut3UCKtv7tctRVmecTj5WETxuMi9mvHgGPNxY9at81")
+PUMP_CURVE_TRAIL_15 = Pubkey.from_string("5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6")
+# Where the curve fee_recipient pubkey lives inside the (1054-byte) Global account.
+GLOBAL_FEE_RECIPIENT_OFFSET = 483
+
 LAMPORTS_PER_SOL = 1_000_000_000
 
 # ── Instruction discriminators ─────────────────────────────────────────────

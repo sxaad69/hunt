@@ -3,8 +3,8 @@ PumpFun bonding curve v2 — buy/sell instructions and on-chain state reading.
 
 Program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
 
-BUY:  17 accounts (last = optional quote_mint, WSOL for SOL-paired)
-SELL: 15 accounts (creator_vault and token_program are SWAPPED vs buy; last = optional quote_mint, WSOL for SOL-paired)
+BUY:  16 accounts (live order: creator_vault [8], token_program [9], fee_config [12], fee_program [13], two fixed trailing accounts)
+SELL: 16 accounts (same live order as buy)
 """
 
 from __future__ import annotations
@@ -18,13 +18,15 @@ from solders.instruction import AccountMeta, Instruction
 from solders.pubkey import Pubkey
 
 from .constants import (
+    GLOBAL_FEE_RECIPIENT_OFFSET,
     PUMP_BUY_DISCRIMINATOR,
+    PUMP_CURVE_TRAIL_14,
+    PUMP_CURVE_TRAIL_15,
     PUMP_FEE_PROGRAM,
     PUMP_FUN_EVENT_AUTHORITY,
     PUMP_FUN_GLOBAL,
     PUMP_FUN_PROGRAM,
     PUMP_SELL_DISCRIMINATOR,
-    SOL_MINT,
     SYSTEM_PROGRAM,
     TOKEN_PROGRAM,
 )
@@ -207,7 +209,7 @@ async def fetch_fee_recipient(
 
     Falls back to default on failure.
     """
-    default = Pubkey.from_string("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV")
+    default = Pubkey.from_string("GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS")
 
     should_close = http_client is None
     client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -226,8 +228,9 @@ async def fetch_fee_recipient(
             raw = value.get("data", [])
             if isinstance(raw, list) and raw:
                 buf = base64.b64decode(raw[0])
-                if len(buf) >= 73:
-                    return Pubkey.from_bytes(buf[41:73])
+                end = GLOBAL_FEE_RECIPIENT_OFFSET + 32
+                if len(buf) >= end:
+                    return Pubkey.from_bytes(buf[GLOBAL_FEE_RECIPIENT_OFFSET:end])
     except Exception:
         pass
     finally:
@@ -253,7 +256,12 @@ def build_buy_instruction(
     token_program: Pubkey = TOKEN_PROGRAM,
 ) -> Instruction:
     """
-    Build the PumpFun v2 BUY instruction (17 accounts; trailing = optional quote_mint).
+    Build the PumpFun curve BUY instruction (16 accounts, live-program layout).
+
+    Order captured from a successful on-chain CPI:
+    global, fee_recipient, mint, bonding_curve, abc, auc, user, system_program,
+    creator_vault, token_program, event_authority, program, fee_config,
+    fee_program, trailing-14, trailing-15.
 
     Args:
         user: Buyer's wallet (signer).
@@ -271,8 +279,6 @@ def build_buy_instruction(
     associated_user = get_associated_token_address(user, token_mint, token_program)
     associated_bonding_curve = get_associated_token_address(bonding_curve, token_mint, token_program)
     creator_vault = get_creator_vault_pda(creator)
-    global_vol = get_global_volume_accumulator_pda()
-    user_vol = get_user_volume_accumulator_pda(user)
     fee_config = get_fee_config_pda()
 
     data = (
@@ -291,15 +297,14 @@ def build_buy_instruction(
         AccountMeta(associated_user, is_signer=False, is_writable=True),
         AccountMeta(user, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(token_program, is_signer=False, is_writable=False),
         AccountMeta(creator_vault, is_signer=False, is_writable=True),
+        AccountMeta(token_program, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FUN_EVENT_AUTHORITY, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FUN_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(global_vol, is_signer=False, is_writable=True),
-        AccountMeta(user_vol, is_signer=False, is_writable=True),
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(SOL_MINT, is_signer=False, is_writable=False),
+        AccountMeta(PUMP_CURVE_TRAIL_14, is_signer=False, is_writable=False),
+        AccountMeta(PUMP_CURVE_TRAIL_15, is_signer=False, is_writable=False),
     ]
 
     return Instruction(PUMP_FUN_PROGRAM, data, accounts)
@@ -316,9 +321,11 @@ def build_sell_instruction(
     token_program: Pubkey = TOKEN_PROGRAM,
 ) -> Instruction:
     """
-    Build the PumpFun v2 SELL instruction (15 accounts; trailing = optional quote_mint).
+    Build the PumpFun curve SELL instruction (16 accounts, live-program layout).
 
-    NOTE: creator_vault [8] and token_program [9] are SWAPPED vs buy!
+    Mirrors the live buy layout: creator_vault [8], token_program [9], then
+    event_authority, program, fee_config, fee_program + the two trailing
+    fixed accounts.
 
     Args:
         user: Seller's wallet (signer).
@@ -353,13 +360,14 @@ def build_sell_instruction(
         AccountMeta(associated_user, is_signer=False, is_writable=True),
         AccountMeta(user, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(creator_vault, is_signer=False, is_writable=True),   # [8] SWAPPED
-        AccountMeta(token_program, is_signer=False, is_writable=False),  # [9] SWAPPED
+        AccountMeta(creator_vault, is_signer=False, is_writable=True),
+        AccountMeta(token_program, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FUN_EVENT_AUTHORITY, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FUN_PROGRAM, is_signer=False, is_writable=False),
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(SOL_MINT, is_signer=False, is_writable=False),
+        AccountMeta(PUMP_CURVE_TRAIL_14, is_signer=False, is_writable=False),
+        AccountMeta(PUMP_CURVE_TRAIL_15, is_signer=False, is_writable=False),
     ]
 
     return Instruction(PUMP_FUN_PROGRAM, data, accounts)
