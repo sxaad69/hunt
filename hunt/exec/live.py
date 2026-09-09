@@ -86,13 +86,20 @@ class LiveExecutor:
 
     async def _token_balance_raw(self, mint: str, owner: Pubkey | None = None) -> int:
         from solana.rpc.async_api import AsyncClient
+        from solana.rpc.types import TokenAccountOpts
         owner = owner or self.kp.pubkey()
         async with AsyncClient(self.s.rpc_http) as rpc:
-            resp = await rpc.get_token_accounts_by_owner(owner, {"mint": mint})
+            resp = await rpc.get_token_accounts_by_owner(
+                owner, TokenAccountOpts(mint=mint, encoding="jsonParsed")
+            )
         for item in (resp.value or []):
             data = item.account.data
-            if hasattr(data, "amount"):
-                return int(data.amount)
+            try:
+                amt = data.parsed["info"]["tokenAmount"]["amount"]
+                return int(amt)
+            except Exception:
+                if hasattr(data, "amount"):
+                    return int(data.amount)
         return 0
 
     async def _token_decimals(self, mint: str) -> int:
