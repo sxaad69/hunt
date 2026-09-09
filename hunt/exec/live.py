@@ -104,10 +104,11 @@ class LiveExecutor:
         return 0
 
     async def _token_decimals(self, mint: str) -> int:
-        from solana.rpc.async_api import AsyncClient
-        async with AsyncClient(self.s.rpc_http) as rpc:
-            resp = await rpc.get_token_supply(mint)
-        return int(resp.value.decimals)
+        result = await self._raw_rpc("getTokenSupply", [mint])
+        try:
+            return int(result["value"]["decimals"])
+        except (TypeError, KeyError):
+            return 6
 
     # -------------------------------------------------------------- signing
     async def _sign_send_instructions(self, instructions: list, blockhash: str = "") -> Optional[str]:
