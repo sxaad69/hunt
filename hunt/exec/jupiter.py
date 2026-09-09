@@ -57,26 +57,45 @@ class JupiterClient:
         )
 
     async def build_swap_transaction(self, quote: QuoteResult, user_pubkey: str) -> Optional[str]:
-        body = {
-            "quoteResponse": quote.raw,
-            "userPublicKey": user_pubkey,
-            "wrapAndUnwrapSol": True,
-            "dynamicComputeUnitLimit": True,
-            "prioritizationFeeLamports": {
+        from solders.transaction import VersionedTransaction
+
+        def _body(priority: dict, dynamic_cu: bool) -> dict:
+            return {
+                "quoteResponse": quote.raw,
+                "userPublicKey": user_pubkey,
+                "wrapAndUnwrapSol": True,
+                "dynamicComputeUnitLimit": dynamic_cu,
+                "prioritizationFeeLamports": priority,
+            }
+
+        bodies = [
+            _body({
                 "priorityLevelWithMaxLamports": {
                     "priorityLevel": "veryHigh",
                     "maxLamports": self.s.priority_fee_max_lamports,
                 }
-            },
-        }
-        data = await fetch_json(
-            self.client, "POST", f"{self.s.jup_base}/swap",
-            json_body=body, headers=self._headers(),
-        )
-        if not data or not data.get("swapTransaction"):
-            logger.warning("jup swap build failed")
-            return None
-        return data["swapTransaction"]
+            }, True),
+            # multi-leg routes sometimes exceed the 1232-byte raw tx cap with the
+            # priority/CU instructions attached — rebuild lean (no fee, fixed CU)
+            _body(0, False),
+        ]
+        for body in bodies:
+            data = await fetch_json(
+                self.client, "POST", f"{self.s.jup_base}/swap",
+                json_body=body, headers=self._headers(),
+            )
+            if not data or not data.get("swapTransaction"):
+                continue
+            raw = base64.b64decode(data["swapTransaction"])
+            try:
+                size = len(bytes(VersionedTransaction.from_bytes(raw).message))
+            except Exception:
+                size = len(raw)
+            if size > 1232:
+                logger.warning("jup swap tx oversized ({} bytes) — trying leaner build", size)
+                continue
+            return data["swapTransaction"]
+        return None
 
     async def sign_and_send(self, swap_tx_b64: str, kp: Keypair) -> Optional[str]:
         from solana.rpc.async_api import AsyncClient
