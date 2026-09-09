@@ -96,7 +96,7 @@ class LiveExecutor:
     async def _token_balance_raw(self, mint: str, owner: Pubkey | None = None) -> int:
         owner = owner or self.kp.pubkey()
         result = await self._raw_rpc("getTokenAccountsByOwner",
-                                     [str(owner), {"mint": mint, "encoding": "jsonParsed"}])
+                                     [str(owner), {"mint": mint}, {"encoding": "jsonParsed"}])
         for acc in (result or {}).get("value") or []:
             parsed = acc.get("account", {}).get("data", {}).get("parsed")
             if parsed and parsed.get("info", {}).get("tokenAmount") is not None:
@@ -132,9 +132,10 @@ class LiveExecutor:
         unparseable (caller falls back to plan expectations).
         """
         try:
+            from solders.signature import Signature
             from solana.rpc.async_api import AsyncClient
             async with AsyncClient(self.rpc) as rpc:
-                tx = await rpc.get_transaction(sig, encoding="jsonParsed", max_supported_transaction_version=0)
+                tx = await rpc.get_transaction(Signature.from_string(sig), encoding="jsonParsed", max_supported_transaction_version=0)
         except Exception as e:
             logger.debug("parse_fill getTransaction error: {}", e)
             return None
