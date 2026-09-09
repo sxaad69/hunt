@@ -125,41 +125,14 @@ class LiveExecutor:
             return str(resp.value)
 
     # -------------------------------------------------------------- parsing
-    async def _parse_fill(self, sig: str, mint: str) -> "tuple[int, int] | None":
-        """Post-token-balances deltas for our wallet: (tokens_raw_delta, sol_delta).
-
-        Token delta is signed (+bought / -sold). SOL delta = net change of the
-        wallet (negative when buying, positive when selling). Returns None when
-        unparseable (caller falls back to plan expectations).
-        """
-        try:
-            from solders.signature import Signature
-            from solana.rpc.async_api import AsyncClient
-            async with AsyncClient(self.rpc) as rpc:
-                tx = await rpc.get_transaction(Signature.from_string(sig), encoding="jsonParsed", max_supported_transaction_version=0)
-        except Exception as e:
-            logger.debug("parse_fill getTransaction error: {}", e)
-            return None
-        try:
-            meta = tx.value.transaction.meta
-            if not meta:
-                return None
-            keys = tx.value.transaction.transaction.message.account_keys
-            my_idx = [str(k) for k in keys].index(self.wallet)
-            pre_tok = {str(b.mint): int(b.ui_token_amount.amount or 0)
-                       for b in (meta.pre_token_balances or []) if str(b.owner) == self.wallet}
-            post_tok = {str(b.mint): int(b.ui_token_amount.amount or 0)
-                        for b in (meta.post_token_balances or []) if str(b.owner) == self.wallet}
-            tok_delta = post_tok.get(mint, 0) - pre_tok.get(mint, 0)
-            pre_sol = (meta.pre_balances or [0] * (len(meta.post_balances) or my_idx + 1))
-            post_sol = (meta.post_balances or pre_sol)
-            if my_idx >= len(pre_sol):
-                return None
-            sol_delta = post_sol[my_idx] - pre_sol[my_idx]
-            return int(tok_delta), int(sol_delta)
-        except Exception as e:
-            logger.debug("parse_fill parse error: {}", e)
-            return None
+    async def _snapshot(self, mint: str) -> "tuple[int, int]":
+        """(sol_lamports, token_raw) of the wallet right now. Robust to Jupiter's
+        versioned txs + ALTs (get_transaction account_keys doesn't always include
+        the signer). Buy/sell measure TRUE deltas around the confirmed fill."""
+        bal = await self._raw_rpc("getBalance", [str(self.kp.pubkey())])
+        sol = int((bal or {}).get("value") or 0)
+        tok = await self._token_balance_raw(mint)
+        return sol, tok
 
     # ------------------------------------------------------------------ BUY
     async def buy(self, mint: str, size_sol: float, slippage_bps: int | None = None) -> Optional[BuyResult]:
@@ -184,6 +157,7 @@ class LiveExecutor:
         return None
 
     async def _buy_curve(self, mint: str, sol_lamports: int, slippage_bps: int) -> Optional[BuyResult]:
+        pre_sol, _ = await self._snapshot(mint)
         try:
             plan = await build_buy(self.rpc, self.kp.pubkey(), mint, sol_lamports,
                                    slippage_bps=slippage_bps, http_client=self.http)
@@ -193,10 +167,10 @@ class LiveExecutor:
         sig = await self._sign_send_instructions(plan.instructions)
         if not sig:
             return None
-        fill = await self._parse_fill(sig, mint) or (plan.expected_tokens, -sol_lamports)
-        tok_delta, sol_delta = fill
-        return BuyResult(tokens_raw=max(0, tok_delta) or plan.expected_tokens,
-                         sol_lamports=abs(sol_delta) or sol_lamports,
+        post_sol, post_tok = await self._snapshot(mint)
+        sol_spent = max(0, pre_sol - post_sol) or sol_lamports
+        return BuyResult(tokens_raw=post_tok or plan.expected_tokens,
+                         sol_lamports=sol_spent,
                          venue="curve", signature=sig, expected=plan.expected_tokens)
 
     async def _buy_amm(self, mint: str, sol_lamports: int, slippage_bps: int) -> Optional[BuyResult]:
@@ -209,13 +183,14 @@ class LiveExecutor:
         tx_b64 = await jup.build_swap_transaction(quote, self.wallet)
         if not tx_b64:
             return None
+        pre_sol, _ = await self._snapshot(mint)
         sig = await jup.sign_and_send(tx_b64, self.kp)
         if not sig:
             return None
-        fill = await self._parse_fill(sig, mint) or (quote.out_amount_raw, -sol_lamports)
-        tok_delta, sol_delta = fill
-        return BuyResult(tokens_raw=max(0, tok_delta) or quote.out_amount_raw,
-                         sol_lamports=abs(sol_delta) or sol_lamports,
+        post_sol, post_tok = await self._snapshot(mint)
+        sol_spent = max(0, pre_sol - post_sol) or sol_lamports
+        return BuyResult(tokens_raw=post_tok or quote.out_amount_raw,
+                         sol_lamports=sol_spent,
                          venue="amm", signature=sig, expected=quote.out_amount_raw)
 
     # ------------------------------------------------------------------ SELL
@@ -245,6 +220,7 @@ class LiveExecutor:
 
     async def _sell_curve(self, mint: str, token_amount: int, slippage_bps: int,
                           close_ata: bool = True) -> Optional[SellResult]:
+        pre_sol, pre_tok = await self._snapshot(mint)
         try:
             plan = await build_sell(self.rpc, self.kp.pubkey(), mint, token_amount,
                                     slippage_bps=slippage_bps, http_client=self.http)
@@ -257,9 +233,10 @@ class LiveExecutor:
         sig = await self._sign_send_instructions(ixs)
         if not sig:
             return None
-        fill = await self._parse_fill(sig, mint) or (-token_amount, plan.expected_sol_out)
-        tok_delta, sol_delta = fill
-        return SellResult(tokens_raw=min(0, tok_delta), sol_lamports=max(0, sol_delta) or plan.expected_sol_out,
+        post_sol, post_tok = await self._snapshot(mint)
+        tok_sold = pre_tok - post_tok
+        sol_in = post_sol - pre_sol
+        return SellResult(tokens_raw=min(0, -tok_sold), sol_lamports=max(0, sol_in) or plan.expected_sol_out,
                           venue="curve", signature=sig, expected=plan.expected_sol_out)
 
     async def _sell_amm(self, mint: str, token_amount: int, slippage_bps: int) -> Optional[SellResult]:
@@ -272,12 +249,14 @@ class LiveExecutor:
         tx_b64 = await jup.build_swap_transaction(quote, self.wallet)
         if not tx_b64:
             return None
+        pre_sol, pre_tok = await self._snapshot(mint)
         sig = await jup.sign_and_send(tx_b64, self.kp)
         if not sig:
             return None
-        fill = await self._parse_fill(sig, mint) or (-token_amount, quote.out_amount_raw)
-        tok_delta, sol_delta = fill
-        return SellResult(tokens_raw=min(0, tok_delta), sol_lamports=max(0, sol_delta) or quote.out_amount_raw,
+        post_sol, post_tok = await self._snapshot(mint)
+        tok_sold = pre_tok - post_tok
+        sol_in = post_sol - pre_sol
+        return SellResult(tokens_raw=min(0, -tok_sold), sol_lamports=max(0, sol_in) or quote.out_amount_raw,
                           venue="amm", signature=sig, expected=quote.out_amount_raw)
 
 
