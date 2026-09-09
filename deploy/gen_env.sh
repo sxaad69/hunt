@@ -2,7 +2,7 @@
 # Generate /home/hunt/hunt/.env from SSM Parameter Store.
 # Runs AS the hunt user (instance role provides AWS credentials).
 cd /home/hunt/hunt
-for k in HUNT_HELIUS_API_KEY HUNT_BIRDEYE_API_KEY HUNT_TELEGRAM_BOT_TOKEN HUNT_TELEGRAM_CHAT_ID HUNT_SOLANATRACKER_API_KEY HUNT_GMGN_API_KEY; do
+for k in HUNT_HELIUS_API_KEY HUNT_BIRDEYE_API_KEY HUNT_TELEGRAM_BOT_TOKEN HUNT_TELEGRAM_CHAT_ID HUNT_SOLANATRACKER_API_KEY HUNT_GMGN_API_KEY HUNT_WALLET_PRIVATE_KEY; do
   V=$(.venv/bin/aws ssm get-parameter --name /hunt/$k --with-decryption --query Parameter.Value --output text)
   echo "$k=$V"
 done

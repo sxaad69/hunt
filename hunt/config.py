@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     wallet_private_key: Optional[str] = None
     dry_run: bool = True
+    # LIVE mode guardrails (only read when HUNT_DRY_RUN=false)
+    live_min_balance_sol: float = 0.2
+    kill_file: str = "hunt/data/kill_live"
 
     data_dir: str = "hunt/data"
 

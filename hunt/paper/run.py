@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -14,6 +15,20 @@ API = "https://frontend-api-v3.pump.fun/coins"
 REJECT_FILE = Path("a.txt")
 REJECT_FILE2 = Path("hunt/data/paper_rejected.txt")
 PAPER_DB_TABLE = "paper_decisions"
+
+_LIVE_DECIMALS: dict[str, int] = {}
+
+
+def _current_mode() -> str:
+    """'LIVE' when HUNT_DRY_RUN=false, 'PAPER' otherwise."""
+    from hunt.exec.live import live_enabled
+    return "LIVE" if live_enabled() else "PAPER"
+
+
+async def _live_decimals(ex, mint: str) -> int:
+    if mint not in _LIVE_DECIMALS:
+        _LIVE_DECIMALS[mint] = await ex._token_decimals(mint)
+    return _LIVE_DECIMALS[mint]
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {PAPER_DB_TABLE} (
@@ -227,7 +242,7 @@ def ensure_db():
     from hunt.db.database import SCHEMA as MAIN_SCHEMA
     conn.executescript(MAIN_SCHEMA)
     # add tiered-exit columns if missing
-    for col in ("tp_tier INTEGER NOT NULL DEFAULT 0", "realized_sol REAL NOT NULL DEFAULT 0"):
+    for col in ("tp_tier INTEGER NOT NULL DEFAULT 0", "realized_sol REAL NOT NULL DEFAULT 0", "decimals INTEGER NOT NULL DEFAULT 6", "mode TEXT NOT NULL DEFAULT 'PAPER'"):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col}")
         except Exception:
@@ -320,9 +335,12 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             logger.info("no entry price for {} {} — skipping accepted candidate", mint[:8], symbol)
             return False
         sol_usd = _sol_usd()
+        mode = _current_mode()
+        from hunt.exec.live import get_live_executor
+        ex = get_live_executor()
         # check existing open
         conn = sqlite3.connect(DB_PATH)
-        cur = conn.execute("SELECT 1 FROM positions WHERE mint=? AND mode='PAPER' AND status='open' LIMIT 1", (mint,))
+        cur = conn.execute("SELECT 1 FROM positions WHERE mint=? AND mode=? AND status='open' LIMIT 1", (mint, mode))
         if cur.fetchone():
             conn.close()
             return False
@@ -333,27 +351,54 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         if max_open == 0:
             conn.close()
             return False
-        cur = conn.execute("SELECT COUNT(*) FROM positions WHERE mode='PAPER' AND status='open'")
+        cur = conn.execute("SELECT COUNT(*) FROM positions WHERE mode=? AND status='open'", (mode,))
         if (cur.fetchone()[0] or 0) >= max_open:
             conn.close()
             return False
         size_sol = tier.trade_size_sol
-        usd_in = size_sol * sol_usd
-        tokens = usd_in / price_usd
+        if ex is not None:
+            # ---- LIVE: real buy on chain before any DB row exists ----
+            if not ex.kp:
+                conn.close()
+                logger.error("LIVE mode but no wallet — cannot open {}", mint[:8])
+                return False
+            bal = await ex.balance_sol()
+            if bal < size_sol + ex.s.live_min_balance_sol:
+                conn.close()
+                _notify(f"⛔ LIVE: balance {bal:.3f} SOL < {size_sol}+{ex.s.live_min_balance_sol} reserved — skipping {symbol}")
+                logger.warning("LIVE balance too low for {} ({} < {})", symbol, bal, size_sol + ex.s.live_min_balance_sol)
+                return False
+            r = await ex.buy(mint, size_sol)
+            if not r or not r.ok:
+                conn.close()
+                _notify(f"⛔ LIVE BUY FAILED {symbol} {mint[:6]} — position NOT opened")
+                logger.error("LIVE buy failed {}", mint[:8])
+                return False
+            size_sol = r.sol_lamports / 1e9
+            tokens = r.tokens
+            decimals = r.decimals
+            _LIVE_DECIMALS[mint] = r.decimals
+            base_usd = price_usd
+            logger.info("LIVE open {} {} @${:.6g} size {} SOL venue={} sig={}", mint[:8], symbol, price_usd, size_sol, r.venue, r.signature)
+        else:
+            decimals = 6
+            usd_in = size_sol * sol_usd
+            tokens = usd_in / price_usd
+            base_usd = price_usd
         # create position
         conn.execute(
-            "INSERT INTO positions(opened_ts,mint,symbol,mode,size_sol,tokens,entry_price_usd,tp_pct,sl_pct,trail_pct,peak_price_usd,tp_tier,realized_sol) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (int(time.time()), mint, symbol, "PAPER", size_sol, tokens, price_usd, 100.0, -30.0, 20.0, price_usd, 0, 0.0),
+            "INSERT INTO positions(opened_ts,mint,symbol,mode,size_sol,tokens,entry_price_usd,tp_pct,sl_pct,trail_pct,peak_price_usd,tp_tier,realized_sol,decimals) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(time.time()), mint, symbol, mode, size_sol, tokens, base_usd, 100.0, -30.0, 20.0, base_usd, 0, 0.0, decimals),
         )
         conn.execute(
             "INSERT INTO trades(ts,position_id,mode,side,mint,symbol,amount_sol,token_amount,price_usd,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (int(time.time()), conn.execute("SELECT last_insert_rowid()").fetchone()[0], "PAPER", "BUY", mint, symbol, size_sol, tokens, price_usd, "ok"),
+            (int(time.time()), conn.execute("SELECT last_insert_rowid()").fetchone()[0], mode, "BUY", mint, symbol, size_sol, tokens, base_usd, "ok"),
         )
         conn.commit()
         conn.close()
-        logger.info("PAPER open {} {} @ ${:.6g} size {} SOL", mint[:8], symbol, price_usd, size_sol)
-        mcap_sol = price_usd / sol_usd * 1e9 if sol_usd > 0 else 0
-        _notify(f"🟢 PAPER OPEN {symbol} @{price_usd:.3e} • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}")
+        logger.info("{} open {} {} @ ${:.6g} size {} SOL", mode, mint[:8], symbol, base_usd, size_sol)
+        mcap_sol = base_usd / sol_usd * 1e9 if sol_usd > 0 else 0
+        _notify(f"🟢 {mode} OPEN {symbol} @{base_usd:.3e} • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}")
         return True
     except Exception as e:
         logger.warning("open_paper_position fail {}: {}", mint[:8], e)
@@ -363,7 +408,11 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
 async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
     """Tiered scale-out (+40/60/80) with a ratcheting trailing stop. Each TP tier
     locks profit (sells 1/3); once in profit the stop ratchets up so we never give
-    a winner back. Hard SL only applies before the first tier is hit."""
+    a winner back. Hard SL only applies before the first tier is hit.
+
+    LIVE positions execute REAL sells via hunt.exec.live; proceeds come from the
+    actual fill (parsed from the confirmed tx). If a live sell fails the position
+    is KEPT open (never phantom-closed)."""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -373,6 +422,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
         entry = pos["entry_price_usd"] or price
         if entry <= 0:
             conn.close(); return
+        mode = pos["mode"]
         tokens = pos["tokens"]
         size_sol = pos["size_sol"]
         tp_tier = int(pos["tp_tier"] or 0)
@@ -383,36 +433,65 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
             conn.commit()  # peak MUST persist even when no exit branch fires —
                            # otherwise the trail rebases downward on hot tokens
         change_pct = (price / entry - 1) * 100
-        # fraction of the original position already sold (0.5 per completed tier)
+        # live executor setup (None in paper mode)
+        from hunt.exec.live import get_live_executor
+        ex = get_live_executor() if mode == "LIVE" else None
+        decimals = int(pos["decimals"] or 6)
+        if ex is not None:
+            _LIVE_DECIMALS[mint] = decimals
+
+        async def sell_now(units: float) -> tuple:
+            """Execute a slice. Returns (proceeds_sol, units_sold).
+            * paper: mark-to-market at `price`.
+            * live:  REAL sell of `units` from the chain balance (or the whole
+                     remaining balance when units == 0); proceeds = actual fill.
+            (None, 0) => LIVE sale failed — caller must keep the position open."""
+            if ex is None:
+                return (units * price / sol_usd) if sol_usd > 0 else 0.0, units
+            raw_bal = await ex._token_balance_raw(mint)
+            if raw_bal <= 0:
+                return 0.0, 0.0
+            raw = min(max(1, int(units * 10 ** decimals)), raw_bal) if units > 0 else raw_bal
+            r = await ex.sell(mint, raw, close_ata=(raw == raw_bal))
+            if not r or not r.ok:
+                _notify(f"🆘 SELL FAILED {pos['symbol']} (pos kept open) — tx error, retrying next tick")
+                return None, 0.0
+            units_sold = (-r.tokens_raw) / 10 ** decimals if r.tokens_raw < 0 else raw / 10 ** decimals
+            return r.sol_lamports / 1e9, units_sold
+
         sold_frac = min(0.50 * tp_tier, 0.75) if tp_tier <= len(TIER_FRACS) else 1.0
         # 1) scale out at each newly crossed TP tier
         while tp_tier < len(TIER_TRIGGERS) and change_pct >= TIER_TRIGGERS[tp_tier] * 100:
             frac = TIER_FRACS[tp_tier]
-            sold_tokens = tokens * (frac / (1.0 - sold_frac)) if sold_frac < 1.0 else tokens
-            proceeds = sold_tokens * price / sol_usd if sol_usd > 0 else 0.0
+            sell_units = tokens * (frac / (1.0 - sold_frac)) if sold_frac < 1.0 else tokens
+            proceeds, units_sold = await sell_now(sell_units)
+            if proceeds is None:
+                conn.close(); return
             cost_sold = size_sol * frac
             slice_pnl = proceeds - cost_sold
             realized += slice_pnl
-            tokens -= sold_tokens
+            tokens -= units_sold
             sold_frac += frac
             tp_tier += 1
             conn.execute("UPDATE positions SET tokens=?, tp_tier=?, realized_sol=?, peak_price_usd=? WHERE id=?",
                          (tokens, tp_tier, realized, peak, pos_id))
             conn.commit()
-            logger.info("PAPER tp{} {} +{:.0f}% slice {:+.4f} SOL [ws]", mint[:8], tp_tier, TIER_TRIGGERS[tp_tier - 1] * 100, slice_pnl)
-            _notify(f"💰 TP{tp_tier} {pos['symbol']} +{TIER_TRIGGERS[tp_tier-1]*100:.0f}% slice {slice_pnl:+.4f} SOL")
+            logger.info("{} tp{} {} +{:.0f}% slice {:+.4f} SOL [ws]", mode, mint[:8], tp_tier, TIER_TRIGGERS[tp_tier - 1] * 100, slice_pnl)
+            _notify(f"💰 {mode} TP{tp_tier} {pos['symbol']} +{TIER_TRIGGERS[tp_tier-1]*100:.0f}% slice {slice_pnl:+.4f} SOL")
         # 2) after tier 1 the remaining tranche is protected at breakeven only —
         # a tight trail here would churn out the runner before the moon bag exists
         if tp_tier == 1:
             stop = entry
             if price <= stop:
-                proceeds = tokens * price / sol_usd if sol_usd > 0 else 0.0
+                proceeds, units_sold = await sell_now(0.0)
+                if proceeds is None:
+                    conn.close(); return
                 cost_rem = size_sol * (1.0 - TIER_FRACS[0])
                 realized += proceeds - cost_rem
                 conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason='breakeven_stop', exit_sol=?, pnl_sol=? WHERE id=?",
                              (int(time.time()), realized, realized, pos_id))
                 conn.commit(); conn.close()
-                _notify(f"🔒 BREAKEVEN STOP {pos['symbol']} {realized:+.4f} SOL")
+                _notify(f"🔒 {mode} BREAKEVEN STOP {pos['symbol']} {realized:+.4f} SOL")
                 return
         # 3) moon bag: laddered trail chases the peak — 30% wide below 3x
         #    (survive the chop), 20% at 3x+, 12% at 10x+, 8% at 50x+
@@ -424,22 +503,26 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
                     trail_pct = tr
             trail_stop = peak * (1 - trail_pct)
             if price <= trail_stop:
-                proceeds = tokens * price / sol_usd if sol_usd > 0 else 0.0
+                proceeds, units_sold = await sell_now(0.0)
+                if proceeds is None:
+                    conn.close(); return
                 cost_rem = size_sol * (1.0 - sum(TIER_FRACS))
                 realized += proceeds - cost_rem
                 conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason='moon_bag_trail', exit_sol=?, pnl_sol=? WHERE id=?",
                              (int(time.time()), realized, realized, pos_id))
                 conn.commit(); conn.close()
-                _notify(f"🌙 MOON BAG CLOSED {pos['symbol']} {realized:+.4f} SOL (peak {peak_mult*100:.0f}% of entry, {trail_pct*100:.0f}% trail)")
+                _notify(f"🌙 {mode} MOON BAG CLOSED {pos['symbol']} {realized:+.4f} SOL (peak {peak_mult*100:.0f}% of entry, {trail_pct*100:.0f}% trail)")
                 return
         # 4) hard SL only before any tier is hit (SL_PCT is already in percent)
         if tp_tier == 0 and change_pct <= SL_PCT:
-            proceeds = tokens * price / sol_usd if sol_usd > 0 else 0.0
+            proceeds, units_sold = await sell_now(0.0)
+            if proceeds is None:
+                conn.close(); return
             realized += proceeds - size_sol
             conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason='stop_loss', exit_sol=?, pnl_sol=? WHERE id=?",
                          (int(time.time()), realized, realized, pos_id))
             conn.commit(); conn.close()
-            _notify(f"🛑 SL {pos['symbol']} {realized:+.4f} SOL ({change_pct:.0f}%)")
+            _notify(f"🛑 {mode} SL {pos['symbol']} {realized:+.4f} SOL ({change_pct:.0f}%)")
             return
         conn.close()
     except Exception as e:
@@ -455,7 +538,7 @@ async def _handle_price_update(mint: str, price_usd: float, sol_usd: float):
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        pos = conn.execute("SELECT id FROM positions WHERE mint=? AND mode='PAPER' AND status='open' LIMIT 1", (mint,)).fetchone()
+        pos = conn.execute("SELECT id FROM positions WHERE mint=? AND mode IN ('PAPER','LIVE') AND status='open' LIMIT 1", (mint,)).fetchone()
         conn.close()
         if not pos:
             return
@@ -465,7 +548,8 @@ async def _handle_price_update(mint: str, price_usd: float, sol_usd: float):
 
 
 async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, reason: str):
-    """Sell whatever remains (used for max_hold timeout)."""
+    """Sell whatever remains (used for max_hold timeout). LIVE: real sell of the
+    full chain balance; keeps the position open if the sell fails."""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -473,18 +557,35 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
         if not pos or pos["status"] != "open":
             conn.close(); return
         entry = pos["entry_price_usd"] or price
+        mode = pos["mode"]
         tokens = pos["tokens"]
         size_sol = pos["size_sol"]
         tp_tier = int(pos["tp_tier"] or 0)
         realized = float(pos["realized_sol"] or 0.0)
-        proceeds = tokens * price / sol_usd if sol_usd > 0 else 0.0
+        from hunt.exec.live import get_live_executor
+        ex = get_live_executor() if mode == "LIVE" else None
+        if ex is not None:
+            raw_bal = await ex._token_balance_raw(mint)
+            if raw_bal <= 0:
+                r = None
+                proceeds = 0.0
+            else:
+                r = await ex.sell(mint, raw_bal)
+                if not r or not r.ok:
+                    conn.close()
+                    _notify(f"🆘 FORCE SELL FAILED {pos['symbol']} ({reason}) — position kept open")
+                    logger.error("LIVE force sell failed {} ({})", mint[:8], reason)
+                    return
+                proceeds = r.sol_lamports / 1e9
+        else:
+            proceeds = tokens * price / sol_usd if sol_usd > 0 else 0.0
         cost_rem = size_sol * ((2.0 / 3.0) ** tp_tier)
         realized += proceeds - cost_rem
         conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason=?, exit_sol=?, pnl_sol=? WHERE id=?",
                      (int(time.time()), reason, realized, realized, pos_id))
         conn.commit(); conn.close()
-        logger.info("PAPER close {} {} forced {:+.4f} SOL [ws]", mint[:8], reason, realized)
-        _notify(f"⏹ FORCE CLOSE {pos['symbol']} {reason} {realized:+.4f} SOL")
+        logger.info("{} close {} {} forced {:+.4f} SOL [ws]", mode, mint[:8], reason, realized)
+        _notify(f"⏹ {mode} FORCE CLOSE {pos['symbol']} {reason} {realized:+.4f} SOL")
     except Exception as e:
         logger.debug("force close error {}", e)
 
@@ -508,8 +609,22 @@ async def paper_stops_loop(stop_event: asyncio.Event):
             now = time.time()
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
-            positions = conn.execute("SELECT * FROM positions WHERE mode='PAPER' AND status='open'").fetchall()
+            positions = conn.execute("SELECT * FROM positions WHERE mode IN ('PAPER','LIVE') AND status='open'").fetchall()
             conn.close()
+            # KILL FILE (live safety): emergency close every open LIVE position.
+            # `touch hunt/data/kill_live` on AWS = force-sell + exit now.
+            try:
+                from hunt.config import get_settings
+                if os.path.exists(os.path.abspath(get_settings().kill_file)):
+                    logger.warning("KILL FILE DETECTED — force-closing all LIVE positions")
+                    for pos in list(positions):
+                        if pos["mode"] == "LIVE":
+                            await _force_close(pos["id"], pos["mint"], pos["peak_price_usd"] or pos["entry_price_usd"], _sol_usd(), "kill")
+                    positions = [p for p in positions if p["mode"] != "LIVE"]
+                    os.remove(os.path.abspath(get_settings().kill_file))
+                    _notify("🛑 KILL FILE processed — all LIVE positions closed. Restart to resume.")
+            except Exception as e:
+                logger.debug("kill file error {}", e)
             # keep feed subscriptions in sync with open positions (self-healing
             # after reconnects; unsubscribes closed positions automatically)
             if FEED is not None:
@@ -657,6 +772,22 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
     if _s.telegram_bot_token and _s.telegram_chat_id:
         _NOTIFIER = Notifier(_s.telegram_bot_token, _s.telegram_chat_id)
         _NOTIFIER.start()
+    live = not _s.dry_run
+    if live:
+        # ---- LIVE preflight: fail closed if the wallet/config is not ready ----
+        from hunt.exec.live import get_live_executor
+        ex = get_live_executor()
+        if ex is None or not ex.kp:
+            _notify(f"🔴 FAILED TO START LIVE — HUNT_WALLET_PRIVATE_KEY required when HUNT_DRY_RUN=false (bal check skipped)")
+            logger.critical("LIVE mode requires HUNT_WALLET_PRIVATE_KEY")
+            raise SystemExit("LIVE mode requires HUNT_WALLET_PRIVATE_KEY")
+        bal = await ex.balance_sol()
+        if bal < _s.live_min_balance_sol:
+            _notify(f"🔴 FAILED TO START LIVE — wallet {ex.wallet} balance {bal:.4f} SOL < min {_s.live_min_balance_sol} SOL")
+            logger.critical("LIVE balance too low: {} < {}", bal, _s.live_min_balance_sol)
+            raise SystemExit("LIVE wallet balance too low")
+        _notify(f"🔥 LIVE TRADING STARTED — {ex.wallet[:8]}… {bal:.3f} SOL • {duration_s//60} min window")
+    else:
         _notify(f"🤖 hunt paper run started — {duration_s//60} min window")
     start = time.time()
     end = start + duration_s
@@ -822,10 +953,10 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
     # final stats
     try:
         conn = sqlite3.connect(DB_PATH)
-        open_n = conn.execute("SELECT COUNT(*) FROM positions WHERE mode='PAPER' AND status='open'").fetchone()[0]
-        closed = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_sol),0) FROM positions WHERE mode='PAPER' AND status='closed' AND opened_ts>=?", (int(start),)).fetchone()
+        open_n = conn.execute("SELECT COUNT(*) FROM positions WHERE mode IN ('PAPER','LIVE') AND status='open'").fetchone()[0]
+        closed = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_sol),0) FROM positions WHERE mode IN ('PAPER','LIVE') AND status='closed' AND opened_ts>=?", (int(start),)).fetchone()
         conn.close()
-        logger.info("PAPER positions: open={} closed={} pnl={:+.4f} SOL (opened this run: {})", open_n, closed[0], closed[1], stats["opened"])
+        logger.info("{} positions: open={} closed={} pnl={:+.4f} SOL (opened this run: {})", _current_mode(), open_n, closed[0], closed[1], stats["opened"])
     except: pass
     logger.info("PAPER RUN COMPLETE: duration={}s accepted={} rejected={} total_scanned={} opened_positions={}", int(time.time()-start), stats["accepted"], stats["rejected"], stats["total_scanned"], stats["opened"])
     return {"accepted": stats["accepted"], "rejected": stats["rejected"], "total_scanned": stats["total_scanned"], "opened_positions": stats["opened"], "duration_s": int(time.time()-start)}

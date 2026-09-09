@@ -2,10 +2,11 @@
 
 Memecoin paper-trading bot ("moonshot hunter") for pump.fun. Python/asyncio.
 Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
-**Paper mode only (`HUNT_DRY_RUN=true`) — never place real trades. Never commit secrets.**
+**Paper default (`HUNT_DRY_RUN=true`); live = `HUNT_DRY_RUN=false` + funded wallet key in `.env`. Never commit secrets.**
 
 ## Golden rules
 - **Single instance**: only ONE hunt process runs the campaign at a time. Mac is standby.
+- **Paper default**: `HUNT_DRY_RUN=true` — pure paper (default, always). **Live** = `HUNT_DRY_RUN=false` + `HUNT_WALLET_PRIVATE_KEY` in `.env` (from SSM `/hunt/*`). Live starts fail-closed: preflight requires the wallet key and `balance >= live_min_balance_sol` (0.2), else the service exits WITHOUT trading. Flips to live only via `.env` on AWS — never an unplanned default. Always verify what mode a process started in before hardening decisions.
 - **Deploy flow**: edit/test on Mac → `git push` → SSH to AWS → `git pull` → `sudo systemctl restart hunt`.
 - **Heavy files never in git**: DB, logs, state, backups go through S3 (`s3://hunt-state-362457597397-euc1`).
 - **Strategy changes**: max ONE evidence-backed tweak per day, logged in the daily digest. No blind tuning.
@@ -22,6 +23,8 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Architecture (key modules)
 - `hunt/paper/run.py` — the campaign engine: discovery queue, gate chain, entry pricing, open/exit wiring
+- `hunt/exec/live.py` — REAL execution (dry_run=false only): `LiveExecutor` signs/sends curve + AMM fills, parses ACTUAL token/SOL deltas from confirmed tx post-balances, CLI `balance`/`smoke`
+- `hunt/exec/pumpfun/` — VENDORED pumpfun-python (MIT, unsigned instructions only, keys never enter it) — the exact PumpFun curve v2 buy/sell bytes incl. the sell-account SWAP quirk
 - `hunt/watch/price_feed.py` — real-time bonding-curve pricing (Helius `accountSubscribe`, one shared WS)
 - `hunt/watch/discovery_ws.py` — PumpPortal `subscribeNewToken` stream (sub-second discovery, free)
 - `hunt/paper/run.py::survival_filter` — gate chain (dust floor/ceiling, socials, model, intel, dev reputation)
@@ -30,6 +33,32 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - `deploy/` — systemd units, AWS setup scripts, DEPLOY.md
 - `audit/top_runners.py` — daily "did we miss runners" audit (run on AWS: needs network + live decisions DB)
 - DB: SQLite at `hunt/data/hunt.sqlite3` — every decision stores intel (top10/holders/snipers/dev_pct/burst)
+
+## LIVE mode (HUNT_DRY_RUN=false)
+- **One master switch**: `HUNT_DRY_RUN=true` = pure paper (default). `false` = the SAME
+  engine in `hunt/paper/run.py` executes REAL buys/sells through `hunt/exec/live.py`.
+  No other config flips trading. Never set live on Mac or unplanned.
+- **Preflight (fail-closed)**: live start requires `HUNT_WALLET_PRIVATE_KEY` and
+  `balance >= live_min_balance_sol` (0.2 SOL) — else the service exits WITHOUT trading.
+- **Venue routing**: buy/sell try the PumpFun bonding curve first (species-A live),
+  fall back to the AMM via Jupiter when the curve is complete/graduated (species-B AND
+  any species-A that graduates mid-hold — mint never changes, balances carry over 1:1).
+- **Real fills, real PnL**: every LIVE entry/exit parses ACTUAL token/SOL deltas from
+  the confirmed tx (`_parse_fill`); the SQLite `positions` row stores mode=LIVE, actual
+  tokens (`decimals` column) and size (actual SOL spent). Paper fee-sim is NOT used live.
+- **Partial-sell rule**: SPL CloseAccount reverts the whole tx on a non-empty ATA, so tiered
+  scale-out slices are sent WITHOUT the ATA close; only full-remainder sells (SL/breakeven/
+  moon_bag_trail/force_close) include it (`close_ata=` in `LiveExecutor.sell`).
+- **Live sell failure = position KEPT open** (never phantom-closed) + Telegram alert; retries
+  next tick.
+- **Emergency kill**: `touch hunt/data/kill_live` on AWS → next stops-poll force-closes ALL
+  live positions and deletes the file. Restart to resume.
+- **Guardrails**: per-open balance check `size + live_min_balance_sol`, daily-loss cap
+  currently ENV-only (no Telegram `/live` — the deployed service has no control bot).
+- **Deploy**: update `.env` on AWS (`deploy/gen_env.sh` pulls `HUNT_WALLET_PRIVATE_KEY` from
+  SSM `/hunt/HUNT_WALLET_PRIVATE_KEY`) → `systemctl restart hunt`. Funding wallet is generated
+  ON the instance (`python -m hunt.utils.solana gen-wallet`), never on Mac; the address is
+  given to the operator to fund ~1–2 SOL.
 
 ## Strategy (current, frozen until evidence says otherwise)
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
