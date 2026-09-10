@@ -88,16 +88,17 @@ def survival_filter(coin: dict) -> tuple[bool, str]:
             # let it pass to model, but ensure it doesn't get rejected for no_socials
             pass
     except: pass
-    # 2d. MCAP CEILING: DISABLED 2026-09-08 — reopening species-B to chase
-    # USUR-class moonshots again (see AGENTS.md). Previously a hard veto:
-    #   try:
-    #       mc = float(coin.get("market_cap") or 0)
-    #       if mc > MCAP_CEILING_SOL:
-    #           return False, f"mcap_ceiling_{mc:.0f}"
-    #   except: pass
-    # KNOWN RISK: species-B round-dumps slip past -20% SL -> full-stake losses
-    # (6 full-stake SLs on 09-05). Measure SL-death rate (survival-agnostic)
-    # before trusting this; one evidence-backed step, log in daily digest.
+    # 2d. MCAP CEILING: RE-ENABLED 2026-09-11 on explicit operator order
+    # (supervised live — "only species A"). Species-A = curve-stage classic
+    # rides entered <=3000 SOL. Species-B (instant-mega, USUR-class) stays
+    # OUT of the entry universe for this session; its 09-05 full-stake SL-death
+    # risk and post-grad plateau entries were why it was reopened-with-warning.
+    # Previous session (09-08—09-10) ran ceiling-DISABLED chasing B tails.
+    try:
+        mc = float(coin.get("market_cap") or 0)
+        if mc > MCAP_CEILING_SOL:
+            return False, f"mcap_ceiling_{mc:.0f}"
+    except: pass
     # 2e. distribution/bundle gates from in-memory-coin intel (fields provided
     # by the decision-time enrichment; absent for poll-path coins -> no veto)
     try:
