@@ -78,16 +78,30 @@ async def buy(mint: str, size_sol: float) -> int:
     return 0
 
 
-async def sell(mint: str) -> int:
-    from hunt.exec.live import LiveExecutor
+async def sell(mint: str, trail14: str | None = None, trail15: str | None = None,
+             curve_only: bool = False) -> int:
+    from solders.pubkey import Pubkey
 
+    from hunt.exec.live import LiveExecutor
+    import hunt.exec.pumpfun.bonding_curve as bcmod
+
+    if trail14:
+        bcmod.PUMP_CURVE_TRAIL_14 = Pubkey.from_string(trail14)
+        print(f"override trail14={trail14[:10]}")
+    if trail15:
+        bcmod.PUMP_CURVE_TRAIL_15 = Pubkey.from_string(trail15)
+        print(f"override trail15={trail15[:10]}")
     ex = LiveExecutor()
     raw = await ex._token_balance_raw(mint)
     print(f"wallet: {ex.wallet}  token balance raw={raw}")
     if raw <= 0:
         print("nothing to sell")
         return 1
-    r = await ex.sell(mint, raw, close_ata=True)
+    if curve_only:
+        # NO amm fallback: a failed curve preflight must leave tokens untouched
+        r = await ex._sell_curve(mint, raw, ex.s.slippage_bps, close_ata=True)
+    else:
+        r = await ex.sell(mint, raw, close_ata=True)
     if not r or not r.ok:
         print("SELL FAILED (tokens kept — inspect, do NOT assume flat)")
         return 1
@@ -121,6 +135,10 @@ def main() -> int:
     b.add_argument("--size-sol", type=float, default=0.002)
     s = sub.add_parser("sell")
     s.add_argument("--mint", required=True)
+    s.add_argument("--trail14", default=None, help="override sell slot14 (experiment)")
+    s.add_argument("--trail15", default=None, help="override sell slot15/vault (experiment)")
+    s.add_argument("--curve-only", action="store_true",
+                   help="no AMM fallback: failed preflight leaves tokens untouched")
     t = sub.add_parser("status")
     t.add_argument("--mint", default=None)
     args = ap.parse_args()
@@ -129,7 +147,7 @@ def main() -> int:
     if args.cmd == "buy":
         return asyncio.run(buy(args.mint, args.size_sol))
     if args.cmd == "sell":
-        return asyncio.run(sell(args.mint))
+        return asyncio.run(sell(args.mint, args.trail14, args.trail15, args.curve_only))
     return asyncio.run(status(args.mint))
 
 
