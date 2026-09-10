@@ -88,8 +88,12 @@ class JupiterClient:
             if not data or not data.get("swapTransaction"):
                 continue
             raw = base64.b64decode(data["swapTransaction"])
+            # Solana's wire limit is on the FULL serialized transaction
+            # (message + signatures + headers), not the message alone — measuring
+            # the message has vetoed many otherwise-sendable versioned txs with
+            # ALTs. Check the actual packed bytes we would sign+send.
             try:
-                size = len(bytes(VersionedTransaction.from_bytes(raw).message))
+                size = len(bytes(VersionedTransaction.from_bytes(raw)))
             except Exception:
                 size = len(raw)
             if size > 1232:

@@ -32,10 +32,17 @@ from hunt.config import WSOL, get_settings
 from hunt.exec.pumpfun import (
     PumpFunError,
     build_buy,
+    build_create_ata_idempotent,
     build_message,
     build_sell,
     fetch_latest_blockhash,
 )
+from hunt.exec.pumpfun.constants import (
+    SYSTEM_PROGRAM,
+    TOKEN_2022_PROGRAM,
+    TOKEN_PROGRAM,
+)
+from hunt.exec.pumpfun.pda import get_associated_token_address, get_bonding_curve_pda
 from hunt.utils.solana import load_keypair
 
 
@@ -145,32 +152,126 @@ class LiveExecutor:
         tok = await self._token_balance_raw(mint)
         return sol, tok
 
+    async def _curve_quote_mint(self, mint: str) -> Optional[str]:
+        """Read the bonding-curve account's quote mint (offset 83..115, the modern
+        generation field). Returns the quote-mint address, or 'None' reserved for
+        WSOL-quoted curves (zeros at that offset). None if account unreadable."""
+        import base64
+
+        curve = get_bonding_curve_pda(Pubkey.from_string(mint))
+        result = await self._raw_rpc("getAccountInfo", [str(curve), {"encoding": "base64"}])
+        value = (result or {}).get("value")
+        if not value:
+            return None
+        data = base64.b64decode(value["data"][0])
+        if len(data) < 115:
+            return None
+        q = data[83:115]
+        if q == b"\x00" * 32:
+            return WSOL
+        return str(Pubkey(bytes(q)))
+
+    async def _ensure_ata(self, mint_pk: Pubkey, token_program: Pubkey) -> bool:
+        """Idempotent ATA create for the wallet. Returns True if it exists or was
+        created, False on failure. One small tx (rent ~0.002 SOL)."""
+        ata = get_associated_token_address(self.kp.pubkey(), mint_pk, token_program)
+        info = await self._raw_rpc("getAccountInfo", [str(ata), {"encoding": "jsonParsed"}])
+        if (info or {}).get("value"):
+            return True
+        ix = build_create_ata_idempotent(self.kp.pubkey(), mint_pk, ata, token_program)
+        sig = await self._sign_send_instructions([ix])
+        if not sig:
+            return False
+        re = await self._raw_rpc("getAccountInfo", [str(ata), {"encoding": "jsonParsed"}])
+        return bool((re or {}).get("value"))
+
+    async def ensure_atas(
+        self, mint: str, quote_mint: str | None = None,
+    ) -> tuple[bool, Optional[str]]:
+        """Pre-create every token ATA the wallet needs to trade `mint` so the
+        Jupiter swap route can fit under the 1232-byte wire cap (a missing ATA
+        makes Jupiter pack an ATA-create into the swap -> oversized -> no fill).
+
+        Returns (ok, quote_mint). quote_mint is lazily resolved from the curve
+        when not given (WSOL for legacy/quoted-free curves).
+        """
+        import base64 as _b64
+
+        mint_pk = Pubkey.from_string(mint)
+        if quote_mint is None:
+            quote_mint = await self._curve_quote_mint(mint)
+        qm = quote_mint or WSOL
+
+        # token program for the coin:
+        mint_acct = await self._raw_rpc("getAccountInfo", [mint, {"encoding": "jsonParsed"}])
+        owner = "Unknown"
+        try:
+            owner = ((mint_acct or {}).get("value") or {}).get("owner", "")
+        except Exception:
+            pass
+        mint_tp = TOKEN_2022_PROGRAM if owner == str(TOKEN_2022_PROGRAM) else TOKEN_PROGRAM
+        quote_tp = TOKEN_PROGRAM if qm in (WSOL, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") else TOKEN_2022_PROGRAM
+
+        created = True
+        for m, tp in ((mint, mint_tp), (qm, quote_tp), (WSOL, TOKEN_PROGRAM)):
+            try:
+                if not await self._ensure_ata(Pubkey.from_string(m), tp):
+                    created = False
+            except Exception as e:
+                logger.warning("ensure_ata failed {} ({}): {}", m[:8], tp[:8], e)
+                created = False
+        return created, qm
+
     # ------------------------------------------------------------------ BUY
     async def buy(self, mint: str, size_sol: float, slippage_bps: int | None = None) -> Optional[BuyResult]:
-        """Buy `size_sol` SOL of `mint`. Curve first, AMM (Jupiter) on graduation.
-        Each attempt re-quotes (fresh blockhash/quote fix transient flakes).
-        Returns None if ALL attempts fail (caller should NOT open a position)."""
+        """Buy `size_sol` SOL of `mint`.
+
+        Venue order (evidence 2026-09-10):
+          1. AMM via Jupiter — Jupiter routes the pump bonding curve itself for
+             un-graduated coins (exotic/USDC quote mints included), emitting the
+             correct current-program CPI. This is the primary path for ALL coins.
+          2. Direct pump curve buy — fallback ONLY when the curve is WSOL-quoted
+             (the vendored 18-account builder spends SOL; anything else reverts
+             with UnsupportedQuoteMint/6063).
+        Pre-creates the wallet's ATAs (coin + quote + WSOL) so the Jupiter swap
+        fits under the 1232-byte wire cap; a missing ATA inflates the tx over
+        the cap and Jupiter silently refuses to build it (the 09-10 hole).
+
+        Returns None if all attempts fail (caller should NOT open a position).
+        """
         slippage = slippage_bps or self.s.slippage_bps
         lamports = int(size_sol * 1e9)
         decimals = await self._token_decimals(mint)
         attempts = max(1, int(self.s.buy_retries or 1))
+        quote_mint = await self._curve_quote_mint(mint)
+        ok_atas, quote_mint = await self.ensure_atas(mint, quote_mint)
+        if not ok_atas:
+            logger.warning("ATA pre-create incomplete — proceeding anyway for {}", mint[:8])
 
         for attempt in range(attempts):
-            for venue in ("curve", "amm"):
+            for venue in ("amm", "curve"):
                 try:
-                    if venue == "curve":
-                        r = await self._buy_curve(mint, lamports, slippage)
-                    else:
+                    if venue == "amm":
                         r = await self._buy_amm(mint, lamports, slippage)
+                    else:
+                        # direct all the WSOL/legacy curves; skip for exotic quotes
+                        if quote_mint and quote_mint != WSOL:
+                            logger.info("skip direct curve buy {} (quote {}) — using Jupiter",
+                                        mint[:8], quote_mint[:8])
+                            r = None
+                        else:
+                            r = await self._buy_curve(mint, lamports, slippage)
                     if r and r.ok:
                         r.decimals = decimals
                         return r
+                    elif venue == "curve" and r is None:
+                        logger.warning("direct curve buy unavailable {} (quote {})", mint[:8], quote_mint or "WSOL")
                 except Exception as e:
                     logger.warning("live buy {} path failed: {}", venue, e)
             if attempt + 1 < attempts:
                 logger.info("live buy retry {}/{} for {}", attempt + 2, attempts, mint[:8])
                 await asyncio.sleep(0.5 * (attempt + 1))
-        logger.error("live buy failed both venues for {}", mint[:8])
+        logger.error("live buy failed both venues for {} (quote {})", mint[:8], quote_mint or "WSOL")
         return None
 
     async def _buy_curve(self, mint: str, sol_lamports: int, slippage_bps: int) -> Optional[BuyResult]:
@@ -204,6 +305,8 @@ class LiveExecutor:
             return None
         tx_b64 = await jup.build_swap_transaction(quote, self.wallet)
         if not tx_b64:
+            logger.warning("jup swap build failed for {} — route {} bytes over/veto?",
+                           mint[:8], quote.out_amount_raw)
             return None
         pre_sol, pre_tok = await self._snapshot(mint)
         sig = await jup.sign_and_send(tx_b64, self.kp)
@@ -221,7 +324,12 @@ class LiveExecutor:
     # ------------------------------------------------------------------ SELL
     async def sell(self, mint: str, tokens_raw: int, slippage_bps: int | None = None,
                    close_ata: bool = True) -> Optional[SellResult]:
-        """Sell exactly `tokens_raw` raw units. Curve first, AMM on graduation.
+        """Sell exactly `tokens_raw` raw units.
+
+        Venue order (evidence 2026-09-10):
+          1. AMM via Jupiter — routes both curve (un-graduated, payoff goes to
+             the quote mint) and graduated coins. Primary path.
+          2. Direct pump curve sell — fallback for WSOL-quoted curves.
         Returns None if both venues fail — caller keeps the tokens.
 
         close_ata: only True for full-remainder sells. SPL CloseAccount reverts
@@ -232,13 +340,20 @@ class LiveExecutor:
         decimals = await self._token_decimals(mint)
         attempts = max(1, int(self.s.sell_retries or 1))
         guard_bps = int(self.s.sell_gap_guard_bps or 0)
+        quote_mint = await self._curve_quote_mint(mint)
+        await self.ensure_atas(mint, quote_mint)
         for attempt in range(attempts):
-            for venue in ("curve", "amm"):
+            for venue in ("amm", "curve"):
                 try:
-                    if venue == "curve":
-                        r = await self._sell_curve(mint, tokens_raw, slippage, close_ata)
-                    else:
+                    if venue == "amm":
                         r = await self._sell_amm(mint, tokens_raw, slippage)
+                    else:
+                        if quote_mint and quote_mint != WSOL:
+                            logger.info("skip direct curve sell {} (quote {}) — using Jupiter",
+                                        mint[:8], quote_mint[:8])
+                            r = None
+                        else:
+                            r = await self._sell_curve(mint, tokens_raw, slippage, close_ata)
                     if r and r.ok:
                         r.decimals = decimals
                         if r.expected and r.expected > 0 and guard_bps > 0:
