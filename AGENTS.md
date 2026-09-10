@@ -7,7 +7,12 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 ## Golden rules
 - **Single instance**: only ONE hunt process runs the campaign at a time. Mac is standby.
 - **Paper default**: `HUNT_DRY_RUN=true` — pure paper (default, always). **Live** = `HUNT_DRY_RUN=false` + `HUNT_WALLET_PRIVATE_KEY` in `.env` (from SSM `/hunt/*`). Live starts fail-closed: preflight requires the wallet key and `balance >= live_min_balance_sol` (0.2), else the service exits WITHOUT trading. Flips to live only via `.env` on AWS — never an unplanned default. Always verify what mode a process started in before hardening decisions.
-- **Deploy flow**: edit/test on Mac → `git push` → SSH to AWS → `git pull` → `sudo systemctl restart hunt`.
+- **Deploy flow (git ONLY)**: edit/test on Mac → `git push` → SSH to AWS → `sudo -iu hunt git pull` → `sudo systemctl restart hunt`.
+  NO scp, NO ad-hoc `/tmp/*.py` scripts — every diagnostic/operator tool lives in the repo (`audit/`, `tools/`)
+  and travels by git pull. (2026-09-10: 53 stray `/tmp` scripts archived to `/tmp/hunt_archive_20260910/`.)
+- **Env parity**: `./deploy/sync_env_local.sh` pulls AWS `.env` (all API keys + wallet key) to local `.env`
+  over the EICE tunnel and FORCES `HUNT_DRY_RUN=true` locally. Mac = dev/paper-only by construction;
+  live trading happens only on AWS. `.env` is gitignored on both sides — never commit it.
 - **Heavy files never in git**: DB, logs, state, backups go through S3 (`s3://hunt-state-362457597397-euc1`).
 - **Strategy changes**: max ONE evidence-backed tweak per day, logged in the daily digest. No blind tuning.
 - `.env` holds API keys — gitignored, never printed to logs.
@@ -20,6 +25,10 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Status helper**: `.venv/bin/python /home/hunt/hunt/status.py` (decisions/open/closed/pnl)
 - **Secrets**: SSM Parameter Store `/hunt/*` (SecureString) · state backups: S3 bucket above
 - **Monitoring identity**: IAM user `hunt-deploy` (scoped: EICE tunnel + describe only), profile `[hunt-deploy]`, keys never expire. Root `aws login` sessions expire in ~15 min — don't rely on them.
+- **Mac dev limits (2026-09-10, verified)**: this Mac's network NXDOMAINs `*.pump.fun`
+  (safety-net poll + in-memory-coin enrichment fail locally); PumpPortal WS, Helius RPC,
+  and DexScreener (with UA header) work. Local runs prove boot/gate/exit/shutdown + instruction
+  builders — AWS remains the full-fidelity runner.
 
 ## Architecture (key modules)
 - `hunt/paper/run.py` — the campaign engine: discovery queue, gate chain, entry pricing, open/exit wiring
@@ -31,6 +40,8 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - `hunt/paper/run.py::_process_exit` — exit ladder (see strategy below)
 - `hunt/notify/` — Telegram alerts, control bot (`/status /positions /pnl /pause /kill`), daily digest
 - `deploy/` — systemd units, AWS setup scripts, DEPLOY.md
+- `tools/liquidate.py` — emergency sell-everything (AWS-only, needs `--confirm`)
+- `deploy/sync_env_local.sh` — pull AWS `.env` to Mac (forces paper mode)
 - `audit/top_runners.py` — daily "did we miss runners" audit (run on AWS: needs network + live decisions DB)
 - DB: SQLite at `hunt/data/hunt.sqlite3` — every decision stores intel (top10/holders/snipers/dev_pct/burst)
 
@@ -59,7 +70,12 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Deploy**: update `.env` on AWS (`deploy/gen_env.sh` pulls `HUNT_WALLET_PRIVATE_KEY` from
   SSM `/hunt/HUNT_WALLET_PRIVATE_KEY`) → `systemctl restart hunt`. Funding wallet is generated
   ON the instance (`python -m hunt.utils.solana gen-wallet`), never on Mac; the address is
-  given to the operator to fund ~1–2 SOL.
+  given to the operator to fund ~1–2 SOL. The Mac holds a SYNCED COPY of the key
+  (`./deploy/sync_env_local.sh`) for parity only — local runs are paper-locked
+  (`HUNT_DRY_RUN=true` forced by the sync script), so the key can never trade from Mac.
+- **Emergency liquidation**: `sudo -u hunt .venv/bin/python tools/liquidate.py --confirm` on AWS
+  sells EVERY nonzero token bag to SOL (full remainders, `close_ata=True`); without
+  `--confirm` it only lists bags. Never scp one-off sell scripts.
 
 ## Strategy (current, frozen until evidence says otherwise)
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
@@ -100,7 +116,7 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 ## Audit tooling (`audit/`)
 - `top_runners.py [hours]` — ranks today's ≥10x runners and classifies our response per coin:
   POSITION taken / seen+REJECTED (with reason) / never seen. Run on AWS (network + live DB):
-  `cd /home/hunt/hunt && sudo -u hunt .venv/bin/python /tmp/top_runners.py 24`
+  `cd /home/hunt/hunt && sudo -u hunt .venv/bin/python audit/top_runners.py 24`
 - Methodology matters: a "missed moonshot" = seen at birth and dust-rejected. Giants first-seen above the
   ceiling are not misses. Zero gate-misses is the KPI (verified across 100+ runners so far).
 - `specb_mcap_audit.py [N] [hours] [min_x]` — specimen-B "real picture" monitor. Target list = pump.fun's
@@ -121,6 +137,9 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - If SSH/monitoring fails with AWS auth errors: the bot runs fine on systemd — just note it.
 
 ## Current campaign state (update as things change)
+- ⛔ HALTED 2026-09-10: `hunt.service` stopped + disabled, `kill_live` in place, 0 open
+  positions, wallet flat at 0.401027 SOL. Net live loss vs $49 top-up ≈ 0.089 SOL (~$8.90).
+  Do NOT restart without an explicit operator order.
 - 7-day paper campaign on AWS, started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
 - Two runner species: A = classic curve rides (our edge), B = instant-mega launches (REOPENED 2026-09-08:
   ceiling commented to chase USUR-class tails again — see species-B decision above; `specb_mcap_audit.py`

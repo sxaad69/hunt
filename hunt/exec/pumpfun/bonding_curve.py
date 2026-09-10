@@ -28,6 +28,7 @@ from solders.pubkey import Pubkey
 from .constants import (
     GLOBAL_FEE_RECIPIENT_OFFSET,
     PUMP_BUY_DISCRIMINATOR,
+    PUMP_CURVE_TRAIL_14,
     PUMP_CURVE_TRAIL_15,
     PUMP_FEE_PROGRAM,
     PUMP_FUN_EVENT_AUTHORITY,

@@ -13,7 +13,17 @@ ssh -i ~/Documents/aws/hunt \
 ```
 (Requires a valid `aws login` session — grants expire ~15 min, re-run `aws login` when needed.)
 
-## Deploy flow (code changes)
+## Local dev + env parity (Mac)
+```bash
+./deploy/sync_env_local.sh   # pull AWS .env (keys + wallet) -> local .env, forces HUNT_DRY_RUN=true
+.venv/bin/python -m hunt.paper.run 60   # paper smoke: proves boot/gate/exit/shutdown
+```
+- Mac = develop/test only. **Never run live on Mac** (`HUNT_DRY_RUN=true` is forced by the sync script).
+- Mac network limits (verified 2026-09-10): `*.pump.fun` does not resolve here, so the
+  safety-net poll is degraded locally; PumpPortal WS, Helius RPC, and DexScreener work.
+  Local runs prove boot/gate/exit/shutdown + instruction builders — AWS is the full-fidelity runner.
+
+## Deploy flow (code changes — git ONLY)
 ```
 # on Mac
 git add -A && git commit -m "..." && git push
@@ -21,6 +31,9 @@ git add -A && git commit -m "..." && git push
 sudo -iu hunt bash -c 'cd /home/hunt/hunt && git pull'
 sudo systemctl restart hunt
 ```
+- **No scp, no ad-hoc `/tmp/*.py` scripts, ever.** Every diagnostic/operator tool lives in
+  the repo (`audit/`, `tools/`) and travels by `git pull`. Strays archived 2026-09-10
+  to `/tmp/hunt_archive_20260910/` on the instance.
 Heavy files (DB, logs, state) NEVER go through git — DB backups live in S3
 (`hunt-state-362457597397-euc1`), secrets in SSM Parameter Store (`/hunt/*`, SecureString).
 
@@ -36,7 +49,9 @@ Campaign clock: `/home/hunt/hunt/state/run_meta.json` (7-day window)
 ## Security posture
 - Zero inbound ports — access only via SSM/EICE (AWS IAM-gated)
 - Secrets in SSM SecureString; instance role limited to `/hunt/*` params + campaign S3 bucket
-- Wallet key: never stored (paper mode) — when going live, use a dedicated dust wallet + Secrets Manager
+- Live wallet key generated on the instance; Mac holds a synced copy (`sync_env_local.sh`)
+  that is paper-locked and gitignored. Live trading happens only on AWS.
+- Emergency: `sudo -u hunt .venv/bin/python tools/liquidate.py --confirm` sells all bags to SOL
 
 ## Monitoring identity (IAM)
 - Scoped IAM user `hunt-deploy`: only EC2 Instance Connect (SSH tunnel) + instance describe.
