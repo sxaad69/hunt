@@ -37,6 +37,19 @@ sudo systemctl restart hunt
 Heavy files (DB, logs, state) NEVER go through git — DB backups live in S3
 (`hunt-state-362457597397-euc1`), secrets in SSM Parameter Store (`/hunt/*`, SecureString).
 
+## Live start (deliberate act only — starting the service is NOT consent)
+The engine refuses `HUNT_DRY_RUN=false` unless `hunt/data/live_armed` exists, and
+refuses to run twice (`state/hunt.lock`). To arm live on AWS:
+```
+# on AWS, ONLY on explicit operator order, service stopped:
+sudo -u hunt touch /home/hunt/hunt/hunt/data/live_armed
+sudo systemctl start hunt   # NOT restart-into-live blindly
+```
+- Remove the marker to disarm: `sudo rm /home/hunt/hunt/hunt/data/live_armed`
+- `/pause` (Telegram) or `touch hunt/data/paused` stops ALL new opens, live or paper.
+- Emergency: `touch hunt/data/kill_live` force-closes live next tick; `tools/liquidate.py
+  --confirm` sells every bag to SOL. Telegram `/kill` and `/close_all` do the same remotely.
+
 ## Service
 ```
 systemctl status hunt        # active = hunting

@@ -145,7 +145,15 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 ## Current campaign state (update as things change)
 - ⛔ HALTED 2026-09-10: `hunt.service` stopped + disabled, `kill_live` in place, 0 open
   positions, wallet flat at ~0.4005 SOL. Net live loss vs $49 top-up ≈ 0.089 SOL (~$8.90).
-  Do NOT restart without an explicit operator order.
+  Do NOT restart without an explicit operator order. NOTE: AWS `.env` still
+  `HUNT_DRY_RUN=false` — the new live_armed gate refuses live without the marker,
+  but flip it to `true` before any manual start anyway.
+- ✅ HARDENED 2026-09-10 (local, ready-to-test, NOT deployed): tier counts LIVE
+  realized PnL · DexScreener last-resort exit for blind graduates (Apple −98% class) ·
+  loss-cap guard screams on failure · buy/sell within-tick retry + fill-gap alert ·
+  single-instance lock + live_armed gate + Telegram control (`/status /positions /pnl
+  /pause /resume /close_all /kill`) + `status --reconcile` + regression tests.
+  Service stays OFF until the operator orders a test.
 - ✅ TRIAL-PROVEN 2026-09-10 (`tools/trial_roundtrip.py`, mmrich, 0.002 SOL):
   curve BUY (venue=curve) + curve SELL (venue=curve) round-trip executed with real fills,
   flat after. Sell path needed two fixes (see echo rule below); trial net ≈ −0.0005 SOL.
