@@ -399,74 +399,94 @@ class LiveExecutor:
                           venue="curve", signature=sig, expected=plan.expected_sol_out)
 
     async def _sell_amm(self, mint: str, token_amount: int, slippage_bps: int) -> Optional[SellResult]:
+        """Sell `token_amount` via Jupiter, directly coin->WSOL.
+
+        Robust for fresh exotic-quote coins (2026-09-11, Rufus): Jupiter
+        sometimes routes only SMALL coin->SOL slices while the full bag has
+        no route / exceeds the 1232-byte wire cap. We adaptively slice the
+        order and REQUIRED verification: a fill is only reported when the
+        wallet's SOL balance ACTUALLY increased AND the coin balance fell —
+        never phantom-close a position from a reverted leg, and never convert
+        coins into an intermediate quote token (that value becomes untracked
+        and the engine would zero the position next tick).
+        """
         from hunt.exec.jupiter import JupiterClient
         jup = JupiterClient(self.http)
-        quote = await jup.quote(mint, WSOL, token_amount, slippage_bps=slippage_bps)
-        if quote:
-            tx_b64 = await jup.build_swap_transaction(quote, self.wallet)
-            if not tx_b64:
-                return None
-            pre_sol, pre_tok = await self._snapshot(mint)
-            sig = await jup.sign_and_send(tx_b64, self.kp)
-            if not sig:
-                return None
-            post_sol, post_tok = await self._snapshot(mint)
-            tok_sold = pre_tok - post_tok
-            if tok_sold <= 0:
-                logger.warning("amm sell no tokens moved — treating as failed {}", mint[:8])
-                return None
-            sol_in = post_sol - pre_sol
-            return SellResult(tokens_raw=min(0, -tok_sold), sol_lamports=max(0, sol_in) or quote.out_amount_raw,
-                              venue="amm", signature=sig, expected=quote.out_amount_raw)
+        remaining = token_amount
+        total_sol_in = 0
+        total_sold = 0
+        last_sig: Optional[str] = None
+        expected_total = 0
 
-        # ---- chained sell fallback (fresh exotic-quote coins 2026-09-11): ----
-        # Jupiter has no direct coin->SOL route until the coin is indexed, but
-        # it DOES route coin->quote_mint and quote_mint->SOL. Sell to the
-        # curve's quote token first, then swap quote->SOL. Two sequential txs.
-        try:
-            qm = await self._curve_quote_mint(mint)
-            if not qm or qm == WSOL:
-                logger.info("jup AMM sell: no route {} and no chained quote (q={})", mint[:8], qm)
+        # remember the largest slice Jupiter could route+build (per call) so we
+        # don't re-halve from the full bag on every remaining chunk.
+        slice_max = token_amount
+        while remaining > 0:
+            slice_amt = min(slice_max, remaining)
+            # shrink until a routable, wire-fitting slice is found (floor 1e6)
+            q = None
+            tx = None
+            for _ in range(32):
+                if slice_amt <= 0:
+                    break
+                try:
+                    q = await jup.quote(mint, WSOL, slice_amt, slippage_bps=slippage_bps)
+                except Exception:
+                    q = None
+                if q and q.out_amount_raw > 0:
+                    try:
+                        tx = await jup.build_swap_transaction(q, self.wallet)
+                    except Exception:
+                        tx = None
+                    if tx:
+                        raw = base64.b64decode(tx)
+                        if len(raw) <= 1232:
+                            break  # usable slice
+                        tx = None
+                # did not fit / no route: halve
+                q = None
+                tx = None
+                slice_amt //= 2
+            if not q or not tx or q.out_amount_raw <= 0:
+                if total_sold > 0:
+                    break  # partial done; stop, do NOT park remainder
+                logger.info("jup AMM sell: no route for {} (any slice)", mint[:8])
                 return None
-            await self._ensure_ata(Pubkey.from_string(qm),
-                                   TOKEN_2022_PROGRAM if qm not in (WSOL, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") else TOKEN_PROGRAM)
-            # leg 1: coin -> quote mint
-            q1 = await jup.quote(mint, qm, token_amount, slippage_bps=slippage_bps)
-            if not q1 or q1.out_amount_raw <= 0:
-                logger.info("jup sell leg1 (coin->quote) no route {}", mint[:8])
-                return None
-            tx1 = await jup.build_swap_transaction(q1, self.wallet)
-            if not tx1:
-                return None
-            pre_sol0, pre_tok0 = await self._snapshot(mint)
-            sig1 = await jup.sign_and_send(tx1, self.kp)
-            if not sig1:
-                logger.warning("chained sell leg1 failed {}", mint[:8])
-                return None
-            mid_sol, mid_tok = await self._snapshot(mint)
-            if mid_tok >= pre_tok0:
-                logger.warning("chained sell leg1 no tokens moved {}", mint[:8])
-                return None
-            # leg 2: quote mint -> WSOL
-            q2 = await jup.quote(qm, WSOL, int(q1.out_amount_raw), slippage_bps=slippage_bps)
-            if not q2 or q2.out_amount_raw <= 0:
-                logger.warning("chained sell leg2 (quote->SOL) no route {} — holding quote", mint[:8])
-                return None
-            tx2 = await jup.build_swap_transaction(q2, self.wallet)
-            if not tx2:
-                return None
-            sig2 = await jup.sign_and_send(tx2, self.kp)
-            if not sig2:
-                logger.warning("chained sell leg2 failed {} — quote unconverted", mint[:8])
+            slice_max = slice_amt
+
+            # ---- verified send of ONE slice ----
+            pre_sol, pre_tok = await self._snapshot(mint)
+            sig = await jup.sign_and_send(tx, self.kp)
+            if not sig:
+                if total_sold > 0:
+                    break
                 return None
             post_sol, post_tok = await self._snapshot(mint)
-            sol_in = post_sol - pre_sol0
-            return SellResult(tokens_raw=min(0, -(pre_tok0 - post_tok)),
-                              sol_lamports=max(0, sol_in) or q2.out_amount_raw,
-                              venue="amm", signature=str(sig2), expected=q2.out_amount_raw)
-        except Exception as e:
-            logger.warning("chained sell failed {}: {}", mint[:8], e)
+            sol_in = post_sol - pre_sol
+            tok_out = pre_tok - post_tok
+            if tok_out <= 0 or sol_in <= 0:
+                logger.warning("sell slice no real fill {} (tok_out={} sol_in={}) — stopping", mint[:8], tok_out, sol_in)
+                if total_sold > 0:
+                    break  # partial done
+                return None
+            total_sol_in += sol_in
+            total_sold += tok_out
+            expected_total += q.out_amount_raw
+            last_sig = sig
+            remaining = post_tok
+            if remaining <= 0:
+                break
+
+        if total_sold <= 0 or total_sol_in <= 0:
+            logger.warning("jup AMM sell no SOL received for {}", mint[:8])
             return None
+        return SellResult(
+            tokens_raw=min(0, -total_sold),
+            sol_lamports=int(total_sol_in),
+            venue="amm",
+            signature=last_sig,
+            expected=int(expected_total),
+        )
 
 
 # --------------------------------------------------------------- module state

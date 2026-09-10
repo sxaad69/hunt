@@ -593,12 +593,30 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
             if not r or not r.ok:
                 _notify(f"🆘 SELL FAILED {pos['symbol']} (pos kept open) — tx error, retrying next tick")
                 return None, 0.0
+            # an exit that asked to sell the WHOLE balance but left coins behind
+            # is a partial slice, not a close — keep the position open (the
+            # proceeds may have been verified but the bag is NOT flat; closing
+            # here would orphan the remainder / rep a fabricated full loss).
+            if units == 0:
+                rem = await ex._token_balance_raw(mint)
+                if rem > 0:
+                    _notify(f"🆘 PARTIAL SELL {pos['symbol']} ({units_sold:.4g}/{units_sold} SOL got, {rem} tokens left) — position kept open")
+                    return None, 0.0
             _gap = int(getattr(r, "gap_bps", 0) or 0)
             if _gap > 0:
                 from hunt.config import get_settings as _gs2
                 if _gap > int(_gs2().sell_gap_guard_bps or 0):
                     _notify(f"⚠️ {mode} FILL GAP {pos['symbol']}: {_gap}bps short (got {r.sol_lamports/1e9:.4f} vs exp {r.expected/1e9:.4f} SOL)")
             units_sold = (-r.tokens_raw) / 10 ** decimals if r.tokens_raw < 0 else raw / 10 ** decimals
+            # an exit that asked to sell the WHOLE balance but left coins behind
+            # is a partial slice, not a close — keep the position open (the
+            # proceeds may have been verified but the bag is NOT flat; closing
+            # here would orphan the remainder / rep a fabricated full loss).
+            if units == 0:
+                rem = await ex._token_balance_raw(mint)
+                if rem > 0:
+                    _notify(f"🆘 PARTIAL SELL {pos['symbol']} ({r.sol_lamports/1e9:.4f} SOL got, {rem} tokens left) — position kept open")
+                    return None, 0.0
             return r.sol_lamports / 1e9, units_sold
 
         sold_frac = min(0.50 * tp_tier, 0.75) if tp_tier <= len(TIER_FRACS) else 1.0
