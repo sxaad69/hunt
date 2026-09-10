@@ -255,9 +255,13 @@ class LiveExecutor:
                         r = await self._buy_amm(mint, lamports, slippage)
                     else:
                         # direct all the WSOL/legacy curves; skip for exotic quotes
+                        # AND for graduated/closed curves (None) where the direct
+                        # builder cannot work — Jupiter handles those too.
                         if quote_mint and quote_mint != WSOL:
                             logger.info("skip direct curve buy {} (quote {}) — using Jupiter",
                                         mint[:8], quote_mint[:8])
+                            r = None
+                        elif quote_mint is None:
                             r = None
                         else:
                             r = await self._buy_curve(mint, lamports, slippage)

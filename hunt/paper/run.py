@@ -220,6 +220,59 @@ async def _jup_entry_price(client: httpx.AsyncClient, mint: str, sol_usd: float)
     except Exception:
         return 0.0
 
+
+async def _curve_reserve_entry_price(
+    ex, client: httpx.AsyncClient, mint: str, sol_usd: float,
+) -> float:
+    """Deterministic entry price from the on-chain bonding-curve reserves.
+
+    Constant-product price = quote_out / token_out for the curve, converted
+    to SOL-equivalent via a Jupiter SOL->quote probe route (routes exist for
+    every trading quote mint — verified 2026-09-10). Needs no RPC stream, so
+    it prices un-graduated coins the feed is blind to.
+
+    Returns USD per token, or 0.0 when the curve/reserves are unreadable.
+    """
+    try:
+        import struct as _st
+        import base64 as _b64
+
+        from hunt.exec.pumpfun.pda import get_bonding_curve_pda
+        from solders.pubkey import Pubkey
+        from hunt.exec.jupiter import JupiterClient
+        from hunt.config import WSOL
+
+        curve = get_bonding_curve_pda(Pubkey.from_string(mint))
+        result = await ex._raw_rpc("getAccountInfo", [str(curve), {"encoding": "base64"}])
+        value = (result or {}).get("value")
+        if not value:
+            return 0.0
+        data = _b64.b64decode(value["data"][0])
+        if len(data) < 49:
+            return 0.0
+        v_token = _st.unpack_from("<Q", data, 8)[0]
+        v_quote = _st.unpack_from("<Q", data, 16)[0]
+        if v_token <= 0 or v_quote <= 0:
+            return 0.0
+        # quote SOL value: WSOL = 1:1; USDC = 1e6/1e9 SOL-ish via price; else probe
+        quote_mint = WSOL
+        if len(data) >= 115 and data[83:115] != b"\x00" * 32:
+            quote_mint = str(Pubkey(data[83:115]))
+        quote_sol_usd = sol_usd  # per 1 SOL of quote == $sol_usd for WSOL
+        if quote_mint != WSOL:
+            jup = JupiterClient(client)
+            # price: how much SOL is 1 quote token worth
+            qq = await jup.quote(quote_mint, WSOL, 10_000_000)
+            if qq and qq.out_amount_raw > 0:
+                quote_sol_usd = (qq.out_amount_raw / 1e9) * sol_usd / (10_000_000 / 1e6)
+            else:
+                return 0.0
+        # constant-product: token_USD = (quote/token) * quote_SOL_usd
+        token_usd = (v_quote / v_token) * quote_sol_usd
+        return token_usd if token_usd > 0 else 0.0
+    except Exception:
+        return 0.0
+
 async def _price_for_mint_fallback(client: httpx.AsyncClient, mint: str) -> float:
     """Price for tokens the curve feed hasn't ticked (graduated/Raydium).
     1) curve feed cache (exact, real-time)  2) GeckoTerminal aggregator.
@@ -333,49 +386,48 @@ async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
 
 async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = None) -> bool:
     try:
-        # ENTRY PRICE: live curve feed first (real-time, exact print from the
-        # bonding curve), then aggregators. Never DexScreener for curve entries.
+        # ENTRY PRICE — order (evidence 2026-09-10): Jupiter buy-route price is
+        # the primary source since the live buy now routes through Jupiter for
+        # every quote-mint family (WSOL/USDC/exotic). Feed is tick-exact but
+        # blind on un-graduated exotic-quote coins; curve-reserve math is the
+        # deterministic fallback; Gecko is last-resort for graduated coins.
         price_usd = 0.0
-        if FEED is not None:
-            q = FEED.quote(mint, max_age_s=10.0)
+        client = ds.client if ds else httpx.AsyncClient(timeout=10)
+        try:
+            price_usd = await _jup_entry_price(client, mint, _sol_usd())
+            if price_usd > 0:
+                logger.info("entry price via jup route {} {} = ${:.6f}", mint[:8], symbol, price_usd)
+        except Exception as e:
+            logger.debug("jup entry price failed {} {}: {}", mint[:8], symbol, e)
+        if price_usd <= 0 and FEED is not None:
+            q = FEED.quote(mint, max_age_s=60.0)
             if q and q.price_usd > 0:
                 price_usd = q.price_usd
+        if price_usd <= 0:
+            # deterministic curve-reserve price (no RPC stream needed), using the
+            # quote mint's SOL value via a probe route when exotic.
+            try:
+                from hunt.exec.live import get_live_executor as _gle2
+                _ex2 = _gle2()
+                if _ex2 is not None:
+                    price_usd = await _curve_reserve_entry_price(_ex2, client, mint, _sol_usd())
+                    if price_usd > 0:
+                        logger.info("entry price via curve reserve {} {} = ${:.6f}", mint[:8], symbol, price_usd)
+            except Exception as e:
+                logger.debug("curve-reserve entry price failed {} {}: {}", mint[:8], symbol, e)
+        if price_usd <= 0:
+            try:
+                price_usd = await _price_for_mint_fallback(client, mint)
+            except: pass
         if price_usd <= 0 and FEED is not None:
             # subscribe — helius pushes the current curve state immediately
             await FEED.subscribe(mint)
-            for _ in range(8):
+            for _ in range(4):
                 await asyncio.sleep(0.25)
                 q = FEED.quote(mint, max_age_s=30.0)
                 if q and q.price_usd > 0:
                     price_usd = q.price_usd
                     break
-        if price_usd <= 0:
-            try:
-                client = ds.client if ds else httpx.AsyncClient(timeout=10)
-                price_usd = await _price_for_mint_fallback(client, mint)
-            except: pass
-        if price_usd <= 0:
-            # fresh coins sometimes don't trade within the first wait window —
-            # give them one more chance before dropping an accepted candidate
-            await asyncio.sleep(8)
-            if FEED is not None:
-                q = FEED.quote(mint, max_age_s=30.0)
-                if q and q.price_usd > 0:
-                    price_usd = q.price_usd
-        if price_usd <= 0 and ds is not None:
-            # LIVENTRY GAP (Kekius/SUPERCYCLE/Job 09-10): accepted candidates
-            # that are already graduated have a DEAD curve feed AND invisible
-            # GeckoTerminal — the exact hole we fixed for exits but not entries.
-            # Jupiter reads the pool directly: if a buy route exists, that is
-            # the real entry price (and the buy will use that same route).
-            try:
-                from hunt.exec.live import get_live_executor
-                client = ds.client if ds else httpx.AsyncClient(timeout=10)
-                price_usd = await _jup_entry_price(client, mint, _sol_usd())
-                if price_usd > 0:
-                    logger.info("entry price via jup route {} {} = ${:.6f}", mint[:8], symbol, price_usd)
-            except Exception as e:
-                logger.debug("jup entry price failed {} {}: {}", mint[:8], symbol, e)
         if price_usd <= 0:
             _notify(f"⚠️ NO ENTRY PRICE {symbol} {mint[:8]} — gated ACCEPT but all price sources blind, skipped")
             logger.info("no entry price for {} {} — skipping accepted candidate", mint[:8], symbol)
