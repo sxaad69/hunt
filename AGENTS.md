@@ -57,6 +57,12 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Real fills, real PnL**: every LIVE entry/exit parses ACTUAL token/SOL deltas from
   the confirmed tx (`_parse_fill`); the SQLite `positions` row stores mode=LIVE, actual
   tokens (`decimals` column) and size (actual SOL spent). Paper fee-sim is NOT used live.
+- **Curve sell echo rule (trial-proven 2026-09-10)**: sell slot14 MUST equal the slot16
+  our buy used = derived `bonding_curve_v2` (builder derives it; the old 4Rut3 constant
+  was HB2r4H-specific and fails with `InvalidBondingCurveV2`/6074 on any other coin).
+  Slot15 = one of the fee program's 8 vaults (any works; must be WRITABLE).
+  Router/bot buys pass their own slot16 scheme (e.g. 62mabQu3…) — only OUR buy→sell
+  pair must echo.
 - **Partial-sell rule**: SPL CloseAccount reverts the whole tx on a non-empty ATA, so tiered
   scale-out slices are sent WITHOUT the ATA close; only full-remainder sells (SL/breakeven/
   moon_bag_trail/force_close) include it (`close_ata=` in `LiveExecutor.sell`).
@@ -138,8 +144,11 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Current campaign state (update as things change)
 - ⛔ HALTED 2026-09-10: `hunt.service` stopped + disabled, `kill_live` in place, 0 open
-  positions, wallet flat at 0.401027 SOL. Net live loss vs $49 top-up ≈ 0.089 SOL (~$8.90).
+  positions, wallet flat at ~0.4005 SOL. Net live loss vs $49 top-up ≈ 0.089 SOL (~$8.90).
   Do NOT restart without an explicit operator order.
+- ✅ TRIAL-PROVEN 2026-09-10 (`tools/trial_roundtrip.py`, mmrich, 0.002 SOL):
+  curve BUY (venue=curve) + curve SELL (venue=curve) round-trip executed with real fills,
+  flat after. Sell path needed two fixes (see echo rule below); trial net ≈ −0.0005 SOL.
 - 7-day paper campaign on AWS, started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
 - Two runner species: A = classic curve rides (our edge), B = instant-mega launches (REOPENED 2026-09-08:
   ceiling commented to chase USUR-class tails again — see species-B decision above; `specb_mcap_audit.py`
