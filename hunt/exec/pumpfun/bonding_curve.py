@@ -382,7 +382,9 @@ def build_sell_instruction(
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
         AccountMeta(PUMP_CURVE_TRAIL_14, is_signer=False, is_writable=False),
-        AccountMeta(PUMP_CURVE_TRAIL_15, is_signer=False, is_writable=False),
+        # slot15 = fee-program vault, MUST be writable (program accrues fees into
+        # it; read-only fails with InvalidBondingCurveV2/6074 — proven in trial).
+        AccountMeta(PUMP_CURVE_TRAIL_15, is_signer=False, is_writable=True),
     ]
 
     return Instruction(PUMP_FUN_PROGRAM, data, accounts)
