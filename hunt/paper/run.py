@@ -339,8 +339,12 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         mode = _current_mode()
         from hunt.exec.live import get_live_executor
         ex = get_live_executor()
+        # operator pause (Telegram /pause or pause file): no new opens at all.
+        from hunt.config import get_settings as _gs
+        if os.path.exists(os.path.abspath(_gs().pause_file)):
+            logger.info("paused — skipping {} {}", mint[:8], symbol)
+            return False
         if mode == "LIVE" and _LIVE_HALTED:
-            conn.close()
             _notify(f"⛔ LIVE DAILY LOSS CAP REACHED — no new live opens until restart/reset")
             return False
         # check existing open
@@ -463,6 +467,11 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
             if not r or not r.ok:
                 _notify(f"🆘 SELL FAILED {pos['symbol']} (pos kept open) — tx error, retrying next tick")
                 return None, 0.0
+            _gap = int(getattr(r, "gap_bps", 0) or 0)
+            if _gap > 0:
+                from hunt.config import get_settings as _gs2
+                if _gap > int(_gs2().sell_gap_guard_bps or 0):
+                    _notify(f"⚠️ {mode} FILL GAP {pos['symbol']}: {_gap}bps short (got {r.sol_lamports/1e9:.4f} vs exp {r.expected/1e9:.4f} SOL)")
             units_sold = (-r.tokens_raw) / 10 ** decimals if r.tokens_raw < 0 else raw / 10 ** decimals
             return r.sol_lamports / 1e9, units_sold
 
@@ -605,6 +614,20 @@ async def price_ws_loop(stop_event: asyncio.Event):
     await FEED.run(stop_event)
 
 
+async def _live_exit_price(client: httpx.AsyncClient, ds, mint: str, live: bool) -> float:
+    """Exit price for one open position. Curve cache → GeckoTerminal, then —
+    for LIVE only — DexScreener as last resort (fresh graduates are often
+    invisible to both: Apple 09-09 went 2h with zero stop evaluations → −98%).
+    Paper path deliberately unchanged (0 = skip, pricing stays consistent)."""
+    price = await _price_for_mint_fallback(client, mint)
+    if price <= 0 and live:
+        try:
+            price, _liq = await ds.price_for_mint(mint)
+        except Exception:
+            price = 0.0
+    return price
+
+
 async def paper_stops_loop(stop_event: asyncio.Event):
     global _LIVE_HALTED
     # ws is the real-time pricing/exit engine for bonding-curve tokens.
@@ -614,6 +637,7 @@ async def paper_stops_loop(stop_event: asyncio.Event):
     client = httpx.AsyncClient(timeout=10)
     # Last-resort pricer for LIVE exits only (see uncovered loop below).
     ds_exits = DexScreener(client)
+    _poll_s = float(get_settings().paper_stops_poll_s or 3.0)
     while not stop_event.is_set():
         try:
             now = time.time()
@@ -625,14 +649,23 @@ async def paper_stops_loop(stop_event: asyncio.Event):
             # `touch hunt/data/kill_live` on AWS = force-sell + exit now.
             try:
                 from hunt.config import get_settings
-                if os.path.exists(os.path.abspath(get_settings().kill_file)):
+                kill_path = os.path.abspath(get_settings().kill_file)
+                if os.path.exists(kill_path):
                     logger.warning("KILL FILE DETECTED — force-closing all LIVE positions")
+                    closed_n = 0
                     for pos in list(positions):
                         if pos["mode"] == "LIVE":
                             await _force_close(pos["id"], pos["mint"], pos["peak_price_usd"] or pos["entry_price_usd"], _sol_usd(), "kill")
+                            closed_n += 1
                     positions = [p for p in positions if p["mode"] != "LIVE"]
-                    os.remove(os.path.abspath(get_settings().kill_file))
-                    _notify("🛑 KILL FILE processed — all LIVE positions closed. Restart to resume.")
+                    try:
+                        os.remove(kill_path)
+                    except Exception as e:
+                        # e.g. root-owned file while running as hunt — the closes
+                        # above already happened; stay fail-closed and say so.
+                        logger.warning("kill file processed but cannot remove {}: {}", kill_path, e)
+                    if closed_n > 0:
+                        _notify(f"🛑 KILL FILE processed — {closed_n} LIVE position(s) closed. Restart to resume.")
             except Exception as e:
                 logger.debug("kill file error {}", e)
             # daily-loss cap (UTC day): realized live losses beyond the cap => halt
@@ -665,19 +698,9 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                     if m not in open_mints:
                         await FEED.unsubscribe(m)
             # only poll mints not recently covered by ws
-            uncovered = [p for p in positions if now - _last_ws_ts.get(p["mint"], 0) > 3.0]
+            uncovered = [p for p in positions if now - _last_ws_ts.get(p["mint"], 0) > _poll_s]
             for pos in uncovered:
-                price = await _price_for_mint_fallback(client, pos["mint"])
-                if price <= 0 and pos["mode"] == "LIVE":
-                    # Fresh graduates: curve feed dead AND GeckoTerminal often
-                    # has no data yet. Apple 09-09 went 2h with ZERO stop
-                    # evaluations this way → exited −98% at the next restart.
-                    # DexScreener indexes new graduates fast — a slightly
-                    # inconsistent price beats NO exit. Paper path unchanged.
-                    try:
-                        price, _liq = await ds_exits.price_for_mint(pos["mint"])
-                    except Exception:
-                        price = 0.0
+                price = await _live_exit_price(client, ds_exits, pos["mint"], pos["mode"] == "LIVE")
                 if price <= 0: continue
                 if price > (pos["peak_price_usd"] or 0):
                     conn = sqlite3.connect(DB_PATH)
@@ -696,7 +719,7 @@ async def paper_stops_loop(stop_event: asyncio.Event):
         except Exception as e:
             logger.debug("paper stops poll error {}", e)
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=3.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=_poll_s)
         except asyncio.TimeoutError:
             pass
     ws_task.cancel()
@@ -826,6 +849,13 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
             _notify(f"🔴 FAILED TO START LIVE — wallet {ex.wallet} balance {bal:.4f} SOL < min {_s.live_min_balance_sol} SOL")
             logger.critical("LIVE balance too low: {} < {}", bal, _s.live_min_balance_sol)
             raise SystemExit("LIVE wallet balance too low")
+        # ---- LIVE arm gate: starting the service is NOT consent to trade.
+        # An operator must deliberately create hunt/data/live_armed first.
+        arm = os.path.abspath(_s.live_arm_file)
+        if not os.path.exists(arm):
+            _notify("🔴 LIVE REFUSED — no live_armed marker (create hunt/data/live_armed to arm live trading)")
+            logger.critical("LIVE refused: {} missing", arm)
+            raise SystemExit("LIVE refused: not armed")
         _notify(f"🔥 LIVE TRADING STARTED — {ex.wallet[:8]}… {bal:.3f} SOL • {duration_s//60} min window")
     else:
         _notify(f"🤖 hunt paper run started — {duration_s//60} min window")
@@ -888,6 +918,8 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
     stops_task = asyncio.create_task(paper_stops_loop(stop_evt))
     hb_task = asyncio.create_task(heartbeat_loop(stop_evt, 60))
     disc_task = asyncio.create_task(new_tokens_loop(stop_evt, on_new_token))
+    from hunt.notify.paper_control import run_paper_control
+    ctrl_task = asyncio.create_task(run_paper_control(stop_evt))
     logger.info("[paper] event-driven discovery active (pumpportal stream) + 60s safety poll")
 
     async with httpx.AsyncClient(timeout=20) as client:
@@ -984,7 +1016,7 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
                 await asyncio.sleep(min(300, max(0, end - time.time())))
 
     stop_evt.set()
-    for t in (hb_task, disc_task, stops_task):
+    for t in (hb_task, disc_task, stops_task, ctrl_task):
         try: t.cancel()
         except: pass
     try:
@@ -1008,4 +1040,21 @@ if __name__ == "__main__":
     from hunt.log import setup_logging
     setup_logging(get_settings().log_level)
     dur = int(sys.argv[1]) if len(sys.argv) > 1 else 3600
-    asyncio.run(run_paper(duration_s=dur))
+    from hunt.utils.pidlock import acquire_lock, release_lock
+    if not acquire_lock():
+        print("another hunt instance is running (state/hunt.lock) — exiting")
+        raise SystemExit(1)
+    import signal as _sig
+
+    def _release(signum, _frame):
+        try:
+            release_lock()
+        except Exception:
+            pass
+        raise SystemExit(128 + signum)
+
+    _sig.signal(_sig.SIGTERM, _release)
+    try:
+        asyncio.run(run_paper(duration_s=dur))
+    finally:
+        release_lock()

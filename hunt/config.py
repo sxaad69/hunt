@@ -40,6 +40,19 @@ class Settings(BaseSettings):
     live_min_balance_sol: float = 0.2
     live_daily_loss_cap_sol: float = 0.5
     kill_file: str = "hunt/data/kill_live"
+    # live_armed marker: LIVE refuses to start without this file (deliberate
+    # operator act — no accidental live trading from a bare service start).
+    live_arm_file: str = "hunt/data/live_armed"
+    # pause marker: while present, NO new positions open (paper or live).
+    # Set via Telegram /pause, cleared via /resume.
+    pause_file: str = "hunt/data/paused"
+    # stops-loop cadence for the paper/live engine (graduated fallback pricing).
+    # Lower = faster stop detection on graduates, more GeckoTerminal load
+    # (free tier ~30 req/min shared across uncovered mints). 3.0 is the
+    # rate-safe default; 1.0 only with <=1 concurrent blind graduate.
+    paper_stops_poll_s: float = 3.0
+    # live sell telemetry: warn when actual < expected by more than this.
+    sell_gap_guard_bps: int = 300
 
     data_dir: str = "hunt/data"
 

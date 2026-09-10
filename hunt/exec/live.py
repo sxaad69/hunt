@@ -47,6 +47,7 @@ class LiveFill:
     signature: Optional[str]
     decimals: int = 6
     expected: Optional[int] = None   # plan expectation (sanity)
+    gap_bps: int = 0           # (sells) expected-vs-actual shortfall, basis points
 
     @property
     def ok(self) -> bool:
@@ -147,22 +148,28 @@ class LiveExecutor:
     # ------------------------------------------------------------------ BUY
     async def buy(self, mint: str, size_sol: float, slippage_bps: int | None = None) -> Optional[BuyResult]:
         """Buy `size_sol` SOL of `mint`. Curve first, AMM (Jupiter) on graduation.
-        Returns None if BOTH venues fail (caller should NOT open a position)."""
+        Each attempt re-quotes (fresh blockhash/quote fix transient flakes).
+        Returns None if ALL attempts fail (caller should NOT open a position)."""
         slippage = slippage_bps or self.s.slippage_bps
         lamports = int(size_sol * 1e9)
         decimals = await self._token_decimals(mint)
+        attempts = max(1, int(self.s.buy_retries or 1))
 
-        for venue in ("curve", "amm"):
-            try:
-                if venue == "curve":
-                    r = await self._buy_curve(mint, lamports, slippage)
-                else:
-                    r = await self._buy_amm(mint, lamports, slippage)
-                if r and r.ok:
-                    r.decimals = decimals
-                    return r
-            except Exception as e:
-                logger.warning("live buy {} path failed: {}", venue, e)
+        for attempt in range(attempts):
+            for venue in ("curve", "amm"):
+                try:
+                    if venue == "curve":
+                        r = await self._buy_curve(mint, lamports, slippage)
+                    else:
+                        r = await self._buy_amm(mint, lamports, slippage)
+                    if r and r.ok:
+                        r.decimals = decimals
+                        return r
+                except Exception as e:
+                    logger.warning("live buy {} path failed: {}", venue, e)
+            if attempt + 1 < attempts:
+                logger.info("live buy retry {}/{} for {}", attempt + 2, attempts, mint[:8])
+                await asyncio.sleep(0.5 * (attempt + 1))
         logger.error("live buy failed both venues for {}", mint[:8])
         return None
 
@@ -215,17 +222,29 @@ class LiveExecutor:
             return None
         slippage = slippage_bps or self.s.slippage_bps
         decimals = await self._token_decimals(mint)
-        for venue in ("curve", "amm"):
-            try:
-                if venue == "curve":
-                    r = await self._sell_curve(mint, tokens_raw, slippage, close_ata)
-                else:
-                    r = await self._sell_amm(mint, tokens_raw, slippage)
-                if r and r.ok:
-                    r.decimals = decimals
-                    return r
-            except Exception as e:
-                logger.warning("live sell {} path failed: {}", venue, e)
+        attempts = max(1, int(self.s.sell_retries or 1))
+        guard_bps = int(self.s.sell_gap_guard_bps or 0)
+        for attempt in range(attempts):
+            for venue in ("curve", "amm"):
+                try:
+                    if venue == "curve":
+                        r = await self._sell_curve(mint, tokens_raw, slippage, close_ata)
+                    else:
+                        r = await self._sell_amm(mint, tokens_raw, slippage)
+                    if r and r.ok:
+                        r.decimals = decimals
+                        if r.expected and r.expected > 0 and guard_bps > 0:
+                            gap = int((r.expected - r.sol_lamports) * 10000 / r.expected)
+                            r.gap_bps = max(0, gap)
+                            if r.gap_bps > guard_bps:
+                                logger.warning("live sell fill gap {}bps (expected {} got {}) {} {}",
+                                               r.gap_bps, r.expected, r.sol_lamports, venue, mint[:8])
+                        return r
+                except Exception as e:
+                    logger.warning("live sell {} path failed: {}", venue, e)
+            if attempt + 1 < attempts:
+                logger.info("live sell retry {}/{} for {}", attempt + 2, attempts, mint[:8])
+                await asyncio.sleep(0.5 * (attempt + 1))
         return None
 
     async def _sell_curve(self, mint: str, token_amount: int, slippage_bps: int,
