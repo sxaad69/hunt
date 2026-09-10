@@ -28,7 +28,6 @@ from solders.pubkey import Pubkey
 from .constants import (
     GLOBAL_FEE_RECIPIENT_OFFSET,
     PUMP_BUY_DISCRIMINATOR,
-    PUMP_CURVE_TRAIL_14,
     PUMP_CURVE_TRAIL_15,
     PUMP_FEE_PROGRAM,
     PUMP_FUN_EVENT_AUTHORITY,
@@ -337,10 +336,15 @@ def build_sell_instruction(
     """
     Build the PumpFun curve SELL instruction (16 accounts, live-program layout).
 
-    Exact order captured from a successful live sell CPI:
+    Order (verified against live sell CPIs + proven in the mmrich trial round-trip):
     global, fee_recipient, mint, bonding_curve, abc, auc, user, system_program,
     creator_vault [8], token_program [9], event_authority, program,
-    fee_config [12], fee_program [13], trail-14 [14], trail-15 [15].
+    fee_config [12], fee_program [13], bonding_curve_v2 [14], fee-vault [15].
+
+    Slot14 MUST echo the slot16 our buy used (derived bonding_curve_v2) —
+    the program rejects anything else with InvalidBondingCurveV2/6074.
+    Slot15 is one of the fee program's vaults (any works on buy; PUMP_CURVE_TRAIL_15
+    proven) and MUST be writable (fee accrual).
 
     Args:
         user: Seller's wallet (signer).
@@ -359,6 +363,9 @@ def build_sell_instruction(
     associated_bonding_curve = get_associated_token_address(bonding_curve, token_mint, token_program)
     creator_vault = get_creator_vault_pda(creator)
     fee_config = get_fee_config_pda()
+    # slot14 = bonding_curve_v2 — MUST echo the slot16 our buy used for this
+    # mint (trial-proven); any other address fails with InvalidBondingCurveV2.
+    curve_v2 = get_bonding_curve_v2_pda(token_mint)
 
     data = (
         PUMP_SELL_DISCRIMINATOR
@@ -381,7 +388,7 @@ def build_sell_instruction(
         AccountMeta(PUMP_FUN_PROGRAM, is_signer=False, is_writable=False),
         AccountMeta(fee_config, is_signer=False, is_writable=False),
         AccountMeta(PUMP_FEE_PROGRAM, is_signer=False, is_writable=False),
-        AccountMeta(PUMP_CURVE_TRAIL_14, is_signer=False, is_writable=False),
+        AccountMeta(curve_v2, is_signer=False, is_writable=False),
         # slot15 = fee-program vault, MUST be writable (program accrues fees into
         # it; read-only fails with InvalidBondingCurveV2/6074 — proven in trial).
         AccountMeta(PUMP_CURVE_TRAIL_15, is_signer=False, is_writable=True),
