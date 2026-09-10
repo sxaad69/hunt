@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from typing import Optional
@@ -97,6 +98,21 @@ class JupiterClient:
             return data["swapTransaction"]
         return None
 
+    async def _tx_failed(self, rpc, sig) -> bool:
+        """True if the confirmed tx actually ERRORED. A signature is NOT success
+        (failed txs confirm fine) — callers MUST NOT treat sig presence as a fill."""
+        for _ in range(4):
+            try:
+                tx = await rpc.get_transaction(sig, commitment="confirmed",
+                                               max_supported_transaction_version=0)
+                if tx is None or tx.value is None:
+                    await asyncio.sleep(1.0)
+                    continue
+                return tx.value.transaction.meta.err is not None
+            except Exception:
+                await asyncio.sleep(1.0)
+        return False  # unknown — callers verify via balance deltas regardless
+
     async def sign_and_send(self, swap_tx_b64: str, kp: Keypair) -> Optional[str]:
         from solana.rpc.async_api import AsyncClient
         from solders.transaction import VersionedTransaction
@@ -109,6 +125,9 @@ class JupiterClient:
                 resp = await rpc.send_raw_transaction(bytes(signed))
                 sig = str(resp.value)
                 await rpc.confirm_transaction(resp.value)
+                if await self._tx_failed(rpc, resp.value):
+                    logger.error("jup swap tx failed on-chain: {}", sig)
+                    return None
                 return sig
         except Exception as e:
             logger.error("send failed: {}", e)

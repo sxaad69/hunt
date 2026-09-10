@@ -113,24 +113,35 @@ def cmd_reconcile():
     for r in open_live:
         mint = r["mint"]
         seen_mints.add(mint)
-        info = rpc(url, "getAccountInfo", [mint, {"encoding": "base64"}])
-        if not info:
-            print(f"  #{r['id']} {r['symbol']}: MINT ACCOUNT GONE")
-            continue
-        tprog = info["owner"]
-        ata, _ = find_program_address(
-            [b58decode(wallet), b58decode(tprog), b58decode(mint)], ASSOCIATED_PROGRAM)
-        acc = rpc(url, "getAccountInfo", [ata, {"encoding": "jsonParsed"}])
-        chain_raw = 0
-        if acc:
+        # sum across ALL token accounts for the mint, under ANY token program
+        # (Jupiter fills aux accounts; fork-program coins live outside the two
+        # official programs — never assume program or account count).
+        chain_raw, n_acc = 0, 0
+        seen_accs = set()
+        for filt in ({"mint": mint}, {"programId": TOKEN_KEG}, {"programId": TOKEN_2022}):
             try:
-                chain_raw = int(acc["data"]["parsed"]["info"]["tokenAmount"]["amount"])
+                res = rpc(url, "getTokenAccountsByOwner",
+                          [wallet, filt, {"encoding": "jsonParsed"}])
             except Exception:
-                chain_raw = -1
+                continue
+            for a in (res or {}).get("value", []) or []:
+                try:
+                    info = a["account"]["data"]["parsed"]["info"]
+                except Exception:
+                    continue
+                if info.get("mint") != mint or a.get("pubkey") in seen_accs:
+                    continue
+                seen_accs.add(a.get("pubkey"))
+                try:
+                    amt = int(info["tokenAmount"]["amount"])
+                except Exception:
+                    continue
+                n_acc += 1
+                chain_raw += amt
         dec = int(r["decimals"] or 6)
         db_raw = round(float(r["tokens"] or 0) * (10 ** dec))
         flag = "OK " if chain_raw == db_raw else "DRIFT"
-        print(f"  #{r['id']} {r['symbol']}: {flag} db_raw={db_raw} chain_raw={chain_raw} ata={ata[:10]}..")
+        print(f"  #{r['id']} {r['symbol']}: {flag} db_raw={db_raw} chain_raw={chain_raw} accts={n_acc}")
     # orphan scan: token bags with no open LIVE row (both token programs)
     orphans = 0
     for prog in (TOKEN_KEG, TOKEN_2022):

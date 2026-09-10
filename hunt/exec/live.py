@@ -174,7 +174,7 @@ class LiveExecutor:
         return None
 
     async def _buy_curve(self, mint: str, sol_lamports: int, slippage_bps: int) -> Optional[BuyResult]:
-        pre_sol, _ = await self._snapshot(mint)
+        pre_sol, pre_tok = await self._snapshot(mint)
         try:
             plan = await build_buy(self.rpc, self.kp.pubkey(), mint, sol_lamports,
                                    slippage_bps=slippage_bps, http_client=self.http)
@@ -185,6 +185,11 @@ class LiveExecutor:
         if not sig:
             return None
         post_sol, post_tok = await self._snapshot(mint)
+        if post_tok <= pre_tok:
+            # confirmed tx but no tokens arrived (failed tx still yields a
+            # signature) — NEVER phantom-fill from the quote.
+            logger.warning("curve buy no tokens moved — treating as failed {}", mint[:8])
+            return None
         sol_spent = max(0, pre_sol - post_sol) or sol_lamports
         return BuyResult(tokens_raw=post_tok or plan.expected_tokens,
                          sol_lamports=sol_spent,
@@ -200,11 +205,14 @@ class LiveExecutor:
         tx_b64 = await jup.build_swap_transaction(quote, self.wallet)
         if not tx_b64:
             return None
-        pre_sol, _ = await self._snapshot(mint)
+        pre_sol, pre_tok = await self._snapshot(mint)
         sig = await jup.sign_and_send(tx_b64, self.kp)
         if not sig:
             return None
         post_sol, post_tok = await self._snapshot(mint)
+        if post_tok <= pre_tok:
+            logger.warning("amm buy no tokens moved — treating as failed {}", mint[:8])
+            return None
         sol_spent = max(0, pre_sol - post_sol) or sol_lamports
         return BuyResult(tokens_raw=post_tok or quote.out_amount_raw,
                          sol_lamports=sol_spent,
@@ -264,6 +272,9 @@ class LiveExecutor:
             return None
         post_sol, post_tok = await self._snapshot(mint)
         tok_sold = pre_tok - post_tok
+        if tok_sold <= 0:
+            logger.warning("curve sell no tokens moved — treating as failed {}", mint[:8])
+            return None
         sol_in = post_sol - pre_sol
         return SellResult(tokens_raw=min(0, -tok_sold), sol_lamports=max(0, sol_in) or plan.expected_sol_out,
                           venue="curve", signature=sig, expected=plan.expected_sol_out)
@@ -284,6 +295,9 @@ class LiveExecutor:
             return None
         post_sol, post_tok = await self._snapshot(mint)
         tok_sold = pre_tok - post_tok
+        if tok_sold <= 0:
+            logger.warning("amm sell no tokens moved — treating as failed {}", mint[:8])
+            return None
         sol_in = post_sol - pre_sol
         return SellResult(tokens_raw=min(0, -tok_sold), sol_lamports=max(0, sol_in) or quote.out_amount_raw,
                           venue="amm", signature=sig, expected=quote.out_amount_raw)
