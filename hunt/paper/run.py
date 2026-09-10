@@ -10,6 +10,8 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
+from hunt.config import get_settings
+
 DB_PATH = "hunt/data/hunt.sqlite3"
 API = "https://frontend-api-v3.pump.fun/coins"
 REJECT_FILE = Path("a.txt")
@@ -18,6 +20,11 @@ PAPER_DB_TABLE = "paper_decisions"
 
 _LIVE_DECIMALS: dict[str, int] = {}
 _LIVE_HALTED = False  # set after hitting the daily loss cap — blocks new live opens
+_RUN_END_TS = 0.0  # run_paper window end; no new opens past it (soft-bound guard)
+# exit-pricing state (LIVE): mint -> (ts, source); blindness alert throttle
+_px_seen: dict[str, tuple[float, str]] = {}
+_blind_warned: dict[str, float] = {}
+_jup_px_cache: dict[str, tuple[float, float]] = {}  # mint -> (ts, price)
 
 
 def _current_mode() -> str:
@@ -344,6 +351,11 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         if os.path.exists(os.path.abspath(_gs().pause_file)):
             logger.info("paused — skipping {} {}", mint[:8], symbol)
             return False
+        # window discipline: the soft-bound overrun must never OPEN past end
+        # (eL5f opened 7 min after its window ended, then sat unmanaged).
+        if _RUN_END_TS and time.time() > _RUN_END_TS:
+            logger.info("past window end — no new opens {} {}", mint[:8], symbol)
+            return False
         if mode == "LIVE" and _LIVE_HALTED:
             _notify(f"⛔ LIVE DAILY LOSS CAP REACHED — no new live opens until restart/reset")
             return False
@@ -390,6 +402,29 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             # anchor to the REAL execution price (fill can be far from the 90s
             # judging snapshot on launch movers — a wrong entry breaks SL/TP/trail)
             base_usd = (size_sol * sol_usd) / tokens if tokens > 0 else price_usd
+            # PAYUP GUARD: a fill far over pool is born below its own stop
+            # (eL5f paid +38% on a $3k pool). Reverse it, don't record it.
+            if ds is not None:
+                try:
+                    pool_px, _pl = await ds.price_for_mint(mint)
+                except Exception:
+                    pool_px = 0.0
+                if pool_px > 0:
+                    from hunt.config import get_settings as _gs5
+                    over = base_usd / pool_px - 1
+                    if over > float(_gs5().live_entry_payup_guard_pct or 15) / 100:
+                        logger.warning("payup guard reversing {} fill ${:.3e} {:.0f}% over pool ${:.3e}",
+                                       mint[:8], base_usd, over * 100, pool_px)
+                        _notify(f"🛟 PAYUP GUARD {symbol}: fill {over*100:.0f}% over pool — reversing, no position")
+                        rb = await ex.sell(mint, int(r.tokens_raw))
+                        if rb and rb.ok:
+                            conn.close()
+                            _notify(f"🛟 PAYUP reversed {symbol}: got {rb.sol_lamports/1e9:.4f} SOL")
+                            return False
+                        logger.error("payup reverse failed — recording managed position {}", mint[:8])
+                        _notify(f"🛟 PAYUP GUARD {symbol}: reverse FAILED, position recorded (SL manages it)")
+                else:
+                    logger.info("payup guard skipped (no pool price) {}", mint[:8])
             logger.info("LIVE open {} {} @${:.6g} size {} SOL venue={} sig={}", mint[:8], symbol, base_usd, size_sol, r.venue, r.signature)
         else:
             decimals = 6
@@ -614,18 +649,59 @@ async def price_ws_loop(stop_event: asyncio.Event):
     await FEED.run(stop_event)
 
 
-async def _live_exit_price(client: httpx.AsyncClient, ds, mint: str, live: bool) -> float:
-    """Exit price for one open position. Curve cache → GeckoTerminal, then —
-    for LIVE only — DexScreener as last resort (fresh graduates are often
-    invisible to both: Apple 09-09 went 2h with zero stop evaluations → −98%).
-    Paper path deliberately unchanged (0 = skip, pricing stays consistent)."""
-    price = await _price_for_mint_fallback(client, mint)
-    if price <= 0 and live:
+async def _live_exit_price(client: httpx.AsyncClient, ds, mint: str, live: bool,
+                           ex=None, sol_usd: float = 0.0) -> tuple[float, str]:
+    """Exit price + source for one open position. Curve cache -> GeckoTerminal
+    -> DexScreener -> Jupiter sell-quote (LIVE only). Paper path deliberately
+    unchanged (old behavior exactly).
+
+    Two structural rules that Apple (-98%) and eL5f (-27%) proved necessary:
+    1) QUORUM: with >=2 disagreeing sources the stop evaluates against the
+       LOWEST credible price (a stale-high source must never suppress a stop).
+    2) Jupiter reads pool state directly, so it prices newborn pools the
+       aggregators haven't indexed yet. If a route exists, the stop works."""
+    cands: list[tuple[float, str]] = []
+    base = await _price_for_mint_fallback(client, mint)
+    if base > 0:
+        cands.append((base, "fallback"))
+    if live:
         try:
-            price, _liq = await ds.price_for_mint(mint)
+            dx, _liq = await ds.price_for_mint(mint)
+            if dx > 0:
+                cands.append((dx, "dex"))
         except Exception:
-            price = 0.0
-    return price
+            pass
+    if live and not cands and ex is not None and sol_usd > 0:
+        try:
+            ts, px = _jup_px_cache.get(mint, (0.0, 0.0))
+            if time.time() - ts > 15.0:
+                from hunt.exec.jupiter import JupiterClient
+                from hunt.config import WSOL
+                raw_bal = await ex._token_balance_raw(mint)
+                px = 0.0
+                if raw_bal > 0:
+                    q = await JupiterClient(client).quote(mint, WSOL, raw_bal)
+                    if q and q.out_amount_raw > 0:
+                        dec = await ex._token_decimals(mint)
+                        ui = raw_bal / (10 ** dec)
+                        if ui > 0:
+                            px = (q.out_amount_raw / 1e9) * sol_usd / ui
+                _jup_px_cache[mint] = (time.time(), px)
+            if px > 0:
+                cands.append((px, "jup"))
+        except Exception as e:
+            logger.debug("jup exit quote failed {}: {}", mint[:8], e)
+    if not cands:
+        return 0.0, "none"
+    if len(cands) >= 2:
+        from hunt.config import get_settings as _gs3
+        lo = min(p for p, _ in cands)
+        hi = max(p for p, _ in cands)
+        if lo > 0 and hi / lo - 1 > float(_gs3().live_price_quorum_pct or 15) / 100:
+            logger.warning("exit price disagreement {}: {} — stops use lowest",
+                           mint[:8], [(s, round(p, 8)) for p, s in cands])
+    cands.sort()
+    return cands[0][0], cands[0][1]
 
 
 async def paper_stops_loop(stop_event: asyncio.Event):
@@ -648,7 +724,6 @@ async def paper_stops_loop(stop_event: asyncio.Event):
             # KILL FILE (live safety): emergency close every open LIVE position.
             # `touch hunt/data/kill_live` on AWS = force-sell + exit now.
             try:
-                from hunt.config import get_settings
                 kill_path = os.path.abspath(get_settings().kill_file)
                 if os.path.exists(kill_path):
                     logger.warning("KILL FILE DETECTED — force-closing all LIVE positions")
@@ -699,8 +774,23 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                         await FEED.unsubscribe(m)
             # only poll mints not recently covered by ws
             uncovered = [p for p in positions if now - _last_ws_ts.get(p["mint"], 0) > _poll_s]
+            from hunt.exec.live import get_live_executor as _gle
+            _ex = _gle()
+            _sol = _sol_usd()
+            _blind_s = float(get_settings().live_blind_alert_s or 120)
             for pos in uncovered:
-                price = await _live_exit_price(client, ds_exits, pos["mint"], pos["mode"] == "LIVE")
+                live_pos = pos["mode"] == "LIVE"
+                price, source = await _live_exit_price(client, ds_exits, pos["mint"], live_pos,
+                                                       _ex if live_pos else None, _sol)
+                if live_pos:
+                    if price > 0:
+                        _px_seen[pos["mint"]] = (now, source)
+                    else:
+                        last, _src = _px_seen.get(pos["mint"], (0.0, ""))
+                        if now - last > _blind_s and now - _blind_warned.get(pos["mint"], 0.0) > 600.0:
+                            _blind_warned[pos["mint"]] = now
+                            _notify(f"👁 BLIND {pos['symbol'] or pos['mint'][:8]} — no exit price for {now-last:.0f}s (curve/gecko/dex/jup all dark)")
+                            logger.warning("LIVE position blind {} for {:.0f}s", pos["mint"][:8], now - last)
                 if price <= 0: continue
                 if price > (pos["peak_price_usd"] or 0):
                     conn = sqlite3.connect(DB_PATH)
@@ -861,6 +951,8 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
         _notify(f"🤖 hunt paper run started — {duration_s//60} min window")
     start = time.time()
     end = start + duration_s
+    global _RUN_END_TS
+    _RUN_END_TS = end
     seen: set[str] = set()
     # preload seen from DB
     conn = sqlite3.connect(DB_PATH)
@@ -1021,13 +1113,27 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
         except: pass
     try:
         await stops_task
-    except: pass
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        # NEVER swallow: a dead stops loop = no exits, no kill-file, no cap.
+        # (An UnboundLocalError here once silenced the whole loop for a session.)
+        logger.error("stops loop died: {}", e)
     # final stats
     try:
         conn = sqlite3.connect(DB_PATH)
         open_n = conn.execute("SELECT COUNT(*) FROM positions WHERE mode IN ('PAPER','LIVE') AND status='open'").fetchone()[0]
         closed = conn.execute("SELECT COUNT(*), COALESCE(SUM(pnl_sol),0) FROM positions WHERE mode IN ('PAPER','LIVE') AND status='closed' AND opened_ts>=?", (int(start),)).fetchone()
+        try:
+            live_open = conn.execute("SELECT COUNT(*) FROM positions WHERE mode='LIVE' AND status='open'").fetchone()[0]
+        except Exception:
+            live_open = 0
         conn.close()
+        if live_open:
+            # bags outliving their manager is how Apple/eL5f bled unmanaged.
+            _notify(f"⚠️ ENGINE STOPPING with {live_open} LIVE bag(s) UNMANAGED — restart to manage or close manually")
+            logger.warning("stopping with {} LIVE positions open", live_open)
+            await asyncio.sleep(2.0)  # let the scream flush before exit
         logger.info("{} positions: open={} closed={} pnl={:+.4f} SOL (opened this run: {})", _current_mode(), open_n, closed[0], closed[1], stats["opened"])
     except: pass
     logger.info("PAPER RUN COMPLETE: duration={}s accepted={} rejected={} total_scanned={} opened_positions={}", int(time.time()-start), stats["accepted"], stats["rejected"], stats["total_scanned"], stats["opened"])

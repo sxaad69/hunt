@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     paper_stops_poll_s: float = 3.0
     # live sell telemetry: warn when actual < expected by more than this.
     sell_gap_guard_bps: int = 300
+    # exit-pricing quorum: LIVE stops evaluate against the LOWEST credible
+    # price when sources disagree by more than this (one stale-high source
+    # must never suppress a stop again — eL5f 09-10).
+    live_price_quorum_pct: float = 15.0
+    # blindness watch: scream when a LIVE position has no exit price at all
+    # for this long (curve drained + aggregators not yet indexing happens on
+    # every newborn graduate; silent skipping is what killed Apple/eL5f).
+    live_blind_alert_s: int = 120
+    # entry payup guard: reverse a LIVE fill that lands this far over pool
+    # (eL5f paid +38% on a $3k pool — born below its own stop).
+    live_entry_payup_guard_pct: float = 15.0
 
     data_dir: str = "hunt/data"
 
