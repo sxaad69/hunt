@@ -23,12 +23,12 @@ TIERS = {
 }
 
 def current_pnl_sol() -> float:
+    # PAPER realized + LIVE realized. Live losses MUST throttle the bot too —
+    # Apple −0.056 (09-09) never moved the tier because only PAPER counted.
     try:
         conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM positions WHERE mode='PAPER'").fetchone()
-        # include unrealized for open
-        open_rows = conn.execute("SELECT entry_price_usd, peak_price_usd, size_sol FROM positions WHERE mode='PAPER' AND status='open'").fetchall()
-        # unrealized approx 0 for tier decision (only realized matters for survival)
+        row = conn.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM positions WHERE mode IN ('PAPER','LIVE')").fetchone()
+        # realized only — unrealized counts 0 for the tier decision.
         conn.close()
         return float(row[0] or 0)
     except:

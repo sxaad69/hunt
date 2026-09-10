@@ -612,6 +612,8 @@ async def paper_stops_loop(stop_event: asyncio.Event):
     # using GeckoTerminal, every 3s.
     ws_task = asyncio.create_task(price_ws_loop(stop_event))
     client = httpx.AsyncClient(timeout=10)
+    # Last-resort pricer for LIVE exits only (see uncovered loop below).
+    ds_exits = DexScreener(client)
     while not stop_event.is_set():
         try:
             now = time.time()
@@ -649,7 +651,10 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                                 await _force_close(pos["id"], pos["mint"], pos["peak_price_usd"] or pos["entry_price_usd"], _sol_usd(), "daily_loss_cap")
                         positions = [p for p in positions if p["mode"] != "LIVE"]
             except Exception as e:
-                logger.debug("daily loss cap error {}", e)
+                # NEVER debug-logged: a broken loss-cap guard must scream. (The
+                # _LIVE_HALTED UnboundLocalError hid here at debug for days
+                # because the running process predated the global-decl fix.)
+                logger.warning("daily loss cap guard FAILED: {}", e)
             # keep feed subscriptions in sync with open positions (self-healing
             # after reconnects; unsubscribes closed positions automatically)
             if FEED is not None:
@@ -663,6 +668,16 @@ async def paper_stops_loop(stop_event: asyncio.Event):
             uncovered = [p for p in positions if now - _last_ws_ts.get(p["mint"], 0) > 3.0]
             for pos in uncovered:
                 price = await _price_for_mint_fallback(client, pos["mint"])
+                if price <= 0 and pos["mode"] == "LIVE":
+                    # Fresh graduates: curve feed dead AND GeckoTerminal often
+                    # has no data yet. Apple 09-09 went 2h with ZERO stop
+                    # evaluations this way → exited −98% at the next restart.
+                    # DexScreener indexes new graduates fast — a slightly
+                    # inconsistent price beats NO exit. Paper path unchanged.
+                    try:
+                        price, _liq = await ds_exits.price_for_mint(pos["mint"])
+                    except Exception:
+                        price = 0.0
                 if price <= 0: continue
                 if price > (pos["peak_price_usd"] or 0):
                     conn = sqlite3.connect(DB_PATH)
