@@ -197,6 +197,29 @@ def _sol_usd() -> float:
 
 _fetch_bucket = RateLimiter(1.2, 6)  # shared limiter for pump.fun frontend calls
 
+async def _jup_entry_price(client: httpx.AsyncClient, mint: str, sol_usd: float) -> float:
+    """Entry-price fallback for graduated coins under an invisible aggregator
+    (Kekius/SUPERCYCLE/Job 09-10): probe a Jupiter buy route. If a route exists
+    for WSOL→mint, the pool IS trading and its price is the entry price — and
+    the actual live buy uses that same route, so price and fill agree.
+    Returns USD price per token, or 0.0 if no route/no decimals."""
+    try:
+        from hunt.exec.jupiter import JupiterClient
+        from hunt.config import WSOL
+        from hunt.exec.live import get_live_executor
+        jup = JupiterClient(client)
+        q = await jup.quote(WSOL, mint, 10_000_000)  # 0.01 SOL probe
+        if not q or q.out_amount_raw <= 0 or q.in_amount_raw <= 0:
+            return 0.0
+        ex_probe = get_live_executor()
+        dec = int(await ex_probe._token_decimals(mint)) if ex_probe else 6
+        ui = q.out_amount_raw / (10 ** dec)
+        if ui <= 0:
+            return 0.0
+        return (q.in_amount_raw / 1e9) * sol_usd / ui
+    except Exception:
+        return 0.0
+
 async def _price_for_mint_fallback(client: httpx.AsyncClient, mint: str) -> float:
     """Price for tokens the curve feed hasn't ticked (graduated/Raydium).
     1) curve feed cache (exact, real-time)  2) GeckoTerminal aggregator.
@@ -339,7 +362,22 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
                 q = FEED.quote(mint, max_age_s=30.0)
                 if q and q.price_usd > 0:
                     price_usd = q.price_usd
+        if price_usd <= 0 and ds is not None:
+            # LIVENTRY GAP (Kekius/SUPERCYCLE/Job 09-10): accepted candidates
+            # that are already graduated have a DEAD curve feed AND invisible
+            # GeckoTerminal — the exact hole we fixed for exits but not entries.
+            # Jupiter reads the pool directly: if a buy route exists, that is
+            # the real entry price (and the buy will use that same route).
+            try:
+                from hunt.exec.live import get_live_executor
+                client = ds.client if ds else httpx.AsyncClient(timeout=10)
+                price_usd = await _jup_entry_price(client, mint, _sol_usd())
+                if price_usd > 0:
+                    logger.info("entry price via jup route {} {} = ${:.6f}", mint[:8], symbol, price_usd)
+            except Exception as e:
+                logger.debug("jup entry price failed {} {}: {}", mint[:8], symbol, e)
         if price_usd <= 0:
+            _notify(f"⚠️ NO ENTRY PRICE {symbol} {mint[:8]} — gated ACCEPT but all price sources blind, skipped")
             logger.info("no entry price for {} {} — skipping accepted candidate", mint[:8], symbol)
             return False
         sol_usd = _sol_usd()

@@ -110,3 +110,49 @@ def test_live_all_dark_returns_none():
     ds = FakeDS(exc=RuntimeError("down"))
     price, source = _run_with(0.0, True, ds, FakeEx(raw=0), sol=100.0)
     assert (price, source) == (0.0, "none")
+
+
+
+class FakeJupQuoteRoute:
+    def __init__(self, out_raw, in_raw=10_000_000):
+        self.out_amount_raw = out_raw
+        self.in_amount_raw = in_raw
+
+
+class FakeJupProxy:
+    def __init__(self, q):
+        self._q = q
+    async def quote(self, a, b, amt):
+        return self._q
+
+
+def test_jup_entry_price_route_math():
+    from hunt.paper import run as r
+    import hunt.exec.jupiter as jmod
+    orig = jmod.JupiterClient
+    jmod.JupiterClient = lambda c: FakeJupProxy(FakeJupQuoteRoute(out_raw=5_000_000_000, in_raw=10_000_000))
+    import hunt.exec.live as lv
+    orig_gle = lv.get_live_executor
+    lv.get_live_executor = lambda: FakeEx(raw=0, dec=6)
+    try:
+        async def go():
+            return await r._jup_entry_price(object(), "MINT", 100.0)
+        px = asyncio.run(go())
+        # 0.01 SOL in, 5000 tokens out @ dec6 -> $1 for 5000 tk -> $0.0002/tk
+        assert abs(px - 0.0002) < 1e-9
+    finally:
+        jmod.JupiterClient = orig
+        lv.get_live_executor = orig_gle
+
+
+def test_jup_entry_price_no_route_returns_zero():
+    from hunt.paper import run as r
+    import hunt.exec.jupiter as jmod
+    jmod.JupiterClient = lambda c: FakeJupProxy(None)
+    try:
+        async def go():
+            return await r._jup_entry_price(object(), "MINT", 100.0)
+        assert asyncio.run(go()) == 0.0
+    finally:
+        import hunt.exec.jupiter as jj
+        jj.JupiterClient = lambda c: FakeJupProxy(None)
