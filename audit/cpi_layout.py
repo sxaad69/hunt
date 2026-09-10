@@ -198,6 +198,144 @@ def fetch_recent_tx(rpc_url: str, mint: str, account: str, slot_cutoff: int = 0)
     print("  no pump program CPI found in recent txs")
 
 
+BUY_DISC = bytes([102, 6, 61, 18, 1, 218, 235, 234])
+SELL_DISC = bytes([51, 230, 133, 164, 1, 127, 131, 173])
+
+
+def _resolve_accounts(inst: dict, keys: list[str]) -> list[str]:
+    """Resolve an instruction's account list to pubkey strings.
+
+    innerInstructions from jsonParsed can hand us pubkey strings OR absolute
+    indexes into the tx account-keys list. Normalize to strings."""
+    out = []
+    for a in inst.get("accounts") or []:
+        if isinstance(a, dict):
+            a = a.get("pubkey", "")
+        if isinstance(a, int):
+            a = keys[a] if a < len(keys) else f"?idx{a}"
+        out.append(str(a))
+    return out
+
+
+def capture_cpi(rpc_url: str, mint: str, limit: int = 40) -> None:
+    """Capture the REAL buy/sell CPI into the pump program for a mint.
+
+    Robust variant of fetch_recent_tx: parses BOTH the raw base64 tx (to get
+    the authoritative account-keys list) and the jsonParsed inner instructions,
+    then scans every instruction (top-level AND inner) that targets the pump
+    program, resolving each account slot. Returns on the first BUY found.
+    """
+    import base64 as b64mod
+    from solders.transaction import VersionedTransaction
+
+    print(f"\n=== capture REAL pump CPI for {mint} ===")
+    curve = get_bonding_curve_pda(Pubkey.from_string(mint))
+    sigs = rpc(rpc_url, "getSignaturesForAddress", [str(curve), {"limit": limit}])
+    logs = sigs.get("result") if isinstance(sigs, dict) else sigs
+    if not isinstance(logs, list) or not logs:
+        print("  no recent signatures")
+        return
+
+    ok_buy = 0
+    ok_sell = 0
+    for sig in sorted(logs, key=lambda s: s.get("blockTime") or 0, reverse=True):
+        s = sig.get("signature", "")
+        # raw base64 first -> authoritative account-keys list
+        try:
+            raw_res = rpc(rpc_url, "getTransaction", [s, {"encoding": "base64", "maxSupportedTransactionVersion": 0}])
+        except Exception as e:
+            print(f"  ! getTransaction(raw) {s[:12]} failed: {e}")
+            continue
+        raw_tx = raw_res.get("result") if isinstance(raw_res, dict) else raw_res
+        if not raw_tx:
+            continue
+        meta = raw_tx.get("meta") or {}
+        if meta.get("err"):
+            continue
+        try:
+            b64 = raw_tx["transaction"][0]
+            vt = VersionedTransaction.from_bytes(b64mod.b64decode(b64))
+            keys = [str(k) for k in vt.message.account_keys]
+        except Exception as e:
+            print(f"  ! solders parse {s[:12]} failed: {e}")
+            continue
+
+        # jsonParsed for inner instructions (programId/accounts)
+        try:
+            parsed_res = rpc(rpc_url, "getTransaction", [s, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "transactionDetails": "full"}])
+        except Exception as e:
+            parsed_res = {}
+        parsed = parsed_res.get("result") if isinstance(parsed_res, dict) else parsed_res
+        if not parsed:
+            continue
+        pmeta = parsed.get("meta") or {}
+        pmsg = parsed.get("message") or {}
+
+        def try_inst(inst: dict, where: str) -> str:
+            nonlocal ok_buy, ok_sell
+            pid = inst.get("programId", "")
+            pmatch = pid == str(PUMP_FUN_PROGRAM)
+            data_b58 = inst.get("data", "")
+            if pmatch or data_b58:
+                # decode base58 data to find discriminator
+                dbytes = None
+                if data_b58:
+                    import base58 as b58
+                    try:
+                        dbytes = b58.b58decode(data_b58)
+                    except Exception:
+                        dbytes = None
+                disc = dbytes[:8] if dbytes and len(dbytes) >= 8 else b""
+                is_buy = disc == BUY_DISC
+                is_sell = disc == SELL_DISC
+                if pmatch or is_buy or is_sell:
+                    accts = _resolve_accounts(inst, keys)
+                    if is_buy:
+                        ok_buy += 1
+                        print(f"\n  >>> BUY CPI {s[:16]} [{where}] accounts={len(accts)} bytes={len(dbytes) if dbytes else 0}")
+                        _print_accts(accts, keys)
+                        return "buy"
+                    if is_sell:
+                        ok_sell += 1
+                        if ok_sell <= 1:
+                            print(f"\n  sell CPI {s[:16]} [{where}] accounts={len(accts)} bytes={len(dbytes) if dbytes else 0}")
+                            _print_accts(accts, keys)
+                        return "sell"
+            return ""
+
+        # top-level instructions first (usually a router -> not pump directly)
+        for inst in pmsg.get("instructions") or []:
+            if try_inst(inst, "top") == "buy":
+                return
+        # inner instructions (the pump CPI lives here for router buys)
+        for inx in pmeta.get("innerInstructions") or []:
+            for inst in inx.get("instructions") or []:
+                r = try_inst(inst, f"inner@{inx.get('index')}")
+                if r == "buy":
+                    return
+        if ok_buy > 0:
+            return
+
+    print("  no BUY pump CPI found in recent txs")
+
+
+def _print_accts(accts: list[str], keys: list[str]) -> None:
+    KNOWN = {
+        "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf": "global",
+        "GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS": "fee_recipient",
+        "11111111111111111111111111111111": "system_program",
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA": "TOKEN_PROGRAM",
+        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb": "TOKEN_2022",
+        "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1": "event_authority",
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "PUMP_PROGRAM",
+        "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ": "FEE_PROGRAM",
+        "So11111111111111111111111111111111111111112": "WSOL",
+    }
+    for i, a in enumerate(accts):
+        tag = KNOWN.get(a, "")
+        print(f"    [{i:>2}] {a}   {tag}")
+
+
 def probe_curve_quote_only(rpc_url: str, mint: str) -> None:
     curve = get_bonding_curve_pda(Pubkey.from_string(mint))
     result = rpc(rpc_url, "getAccountInfo", [str(curve), {"encoding": "base64"}])
@@ -241,6 +379,7 @@ def scan_db(rpc_url: str, db_path: str, hours: int, limit: int) -> None:
           f"({hours}h, <=mcap). quote-mint distribution:")
     counts: dict[str, int] = {}
     exotic: list[tuple] = []
+    unique_quotes: dict[str, int] = {}
     for r in rows:
         curve = get_bonding_curve_pda(Pubkey.from_string(r["mint"]))
         try:
@@ -262,11 +401,16 @@ def scan_db(rpc_url: str, db_path: str, hours: int, limit: int) -> None:
                 counts["USDC"] = counts.get("USDC", 0) + 1
             else:
                 counts["EXOTIC"] = counts.get("EXOTIC", 0) + 1
+                unique_quotes[a] = unique_quotes.get(a, 0) + 1
                 exotic.append((r["mint"][:10], r["symbol"], a[:10], len(data), r["market_cap"]))
         except Exception as e:
             counts["ERR"] = counts.get("ERR", 0) + 1
     for k, v in sorted(counts.items(), key=lambda x: -x[1]):
         print(f"  {k:>8}: {v}")
+    if unique_quotes:
+        print("  unique exotic quote mints (addr: count):")
+        for a, n in sorted(unique_quotes.items(), key=lambda x: -x[1]):
+            print(f"    {a}: {n}")
     if exotic:
         print("  exotic samples (mint, sym, quote, len, mcap):")
         for e in exotic[:25]:
@@ -278,6 +422,7 @@ def main():
     p.add_argument("--mint", action="append", help="token mint(s)")
     p.add_argument("--txhex", default="", help="raw tx hex to decode (optional)")
     p.add_argument("--fetch-tx", action="store_true", help="also pull recent tx for the mint/curve")
+    p.add_argument("--capture-cpi", action="store_true", help="capture real pump BUY/SELL CPI accounts from recent txs")
     p.add_argument("--scan-db", metavar="DB", help="sqlite decisions db to scan")
     p.add_argument("--hours", type=int, default=24, help="scan window (default 24h)")
     p.add_argument("--limit", type=int, default=500, help="max mint rows to scan (default 500)")
@@ -304,6 +449,10 @@ def main():
         for m in args.mint:
             curve = get_bonding_curve_pda(Pubkey.from_string(m))
             fetch_recent_tx(rpc_url, m, str(curve))
+
+    if args.capture_cpi:
+        for m in args.mint:
+            capture_cpi(rpc_url, m)
 
     print("\nquote-mint summary:")
     for m in args.mint:
