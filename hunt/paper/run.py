@@ -180,29 +180,49 @@ _fx_ts = 0.0
 _fx_px = 0.0
 
 
-def _notify(text: str):
-    if _NOTIFIER is not None and _NOTIFIER.enabled:
+def _notify(text: str, *, sol: float | None = None):
+    """SOL is the mark. Optional `sol=` fetches FX once at send time for a $ tag."""
+    if _NOTIFIER is None or not _NOTIFIER.enabled:
+        return
+
+    async def _go():
+        msg = text
+        if sol is not None:
+            try:
+                fx = await _fx_usd_for_notify()
+                if fx > 0:
+                    msg = f"{text} (~${sol * fx:.2f})"
+            except Exception:
+                pass
         try:
             import html as _html
-            asyncio.get_running_loop().create_task(_NOTIFIER.send(_html.escape(text)))
+            await _NOTIFIER.send(_html.escape(msg))
         except Exception:
             pass
 
+    try:
+        asyncio.get_running_loop().create_task(_go())
+    except Exception:
+        pass
+
 
 async def _fx_usd_for_notify() -> float:
-    """On-demand SOL/USD for Telegram only. Not a feed. 60s memo."""
+    """On-demand SOL/USD for Telegram only. Never written onto the price feed."""
     global _fx_ts, _fx_px
     now = time.time()
     if _fx_px > 0 and now - _fx_ts < 60:
         return _fx_px
-    if FEED is not None:
-        try:
-            await FEED.refresh_sol_usd()
-            if FEED.sol_usd > 0:
-                _fx_ts, _fx_px = now, FEED.sol_usd
-                return _fx_px
-        except Exception:
-            pass
+    try:
+        async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "hunt/1"}) as c:
+            r = await c.get(
+                "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112"
+            )
+            px = float(((r.json().get("pairs") or [{}])[0] or {}).get("priceUsd") or 0)
+            if px > 0:
+                _fx_ts, _fx_px = now, px
+                return px
+    except Exception:
+        pass
     return _fx_px if _fx_px > 0 else 0.0
 
 
@@ -576,7 +596,7 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         conn.close()
         logger.info("{} open {} {} @ {:.6g} SOL/tok size {} SOL", mode, mint[:8], symbol, base_sol, size_sol)
         mcap_sol = base_sol * 1e9
-        _notify(f"🟢 {mode} OPEN {symbol} @{base_sol:.3e} SOL/tok • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}")
+        _notify(f"🟢 {mode} OPEN {symbol} @{base_sol:.3e} SOL/tok • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}", sol=size_sol)
         return True
     except Exception as e:
         logger.warning("open_paper_position fail {}: {}", mint[:8], e)
@@ -677,7 +697,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float = 0
                          (tokens, tp_tier, realized, peak, pos_id))
             conn.commit()
             logger.info("{} tp{} {} +{:.0f}% slice {:+.4f} SOL [ws]", mode, mint[:8], tp_tier, TIER_TRIGGERS[tp_tier - 1] * 100, slice_pnl)
-            _notify(f"💰 {mode} TP{tp_tier} {pos['symbol']} +{TIER_TRIGGERS[tp_tier-1]*100:.0f}% slice {slice_pnl:+.4f} SOL")
+            _notify(f"💰 {mode} TP{tp_tier} {pos['symbol']} +{TIER_TRIGGERS[tp_tier-1]*100:.0f}% slice {slice_pnl:+.4f} SOL", sol=slice_pnl)
         # 2) after tier 1 the remaining tranche is protected at breakeven only —
         # a tight trail here would churn out the runner before the moon bag exists
         if tp_tier == 1:
@@ -691,7 +711,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float = 0
                 conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason='breakeven_stop', exit_sol=?, pnl_sol=? WHERE id=?",
                              (int(time.time()), realized, realized, pos_id))
                 conn.commit(); conn.close()
-                _notify(f"🔒 {mode} BREAKEVEN STOP {pos['symbol']} {realized:+.4f} SOL")
+                _notify(f"🔒 {mode} BREAKEVEN STOP {pos['symbol']} {realized:+.4f} SOL", sol=realized)
                 return
         # 3) moon bag: laddered trail chases the peak — 30% wide below 3x
         #    (survive the chop), 20% at 3x+, 12% at 10x+, 8% at 50x+
@@ -711,7 +731,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float = 0
                 conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason='moon_bag_trail', exit_sol=?, pnl_sol=? WHERE id=?",
                              (int(time.time()), realized, realized, pos_id))
                 conn.commit(); conn.close()
-                _notify(f"🌙 {mode} MOON BAG CLOSED {pos['symbol']} {realized:+.4f} SOL (peak {peak_mult*100:.0f}% of entry, {trail_pct*100:.0f}% trail)")
+                _notify(f"🌙 {mode} MOON BAG CLOSED {pos['symbol']} {realized:+.4f} SOL (peak {peak_mult*100:.0f}% of entry, {trail_pct*100:.0f}% trail)", sol=realized)
                 return
         # 4) hard SL only before any tier is hit (SL_PCT is already in percent)
         if tp_tier == 0 and change_pct <= SL_PCT:
@@ -722,7 +742,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float = 0
             conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason='stop_loss', exit_sol=?, pnl_sol=? WHERE id=?",
                          (int(time.time()), realized, realized, pos_id))
             conn.commit(); conn.close()
-            _notify(f"🛑 {mode} SL {pos['symbol']} {realized:+.4f} SOL ({change_pct:.0f}%)")
+            _notify(f"🛑 {mode} SL {pos['symbol']} {realized:+.4f} SOL ({change_pct:.0f}%)", sol=realized)
             return
         conn.close()
     except Exception as e:
@@ -785,7 +805,7 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
                      (int(time.time()), reason, realized, realized, pos_id))
         conn.commit(); conn.close()
         logger.info("{} close {} {} forced {:+.4f} SOL [ws]", mode, mint[:8], reason, realized)
-        _notify(f"⏹ {mode} FORCE CLOSE {pos['symbol']} {reason} {realized:+.4f} SOL")
+        _notify(f"⏹ {mode} FORCE CLOSE {pos['symbol']} {reason} {realized:+.4f} SOL", sol=realized)
     except Exception as e:
         logger.debug("force close error {}", e)
 

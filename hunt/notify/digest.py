@@ -44,7 +44,7 @@ def build_digest() -> str:
     for r in _rows(conn, "SELECT exit_reason, COUNT(*) c, ROUND(SUM(pnl_sol),4) tot FROM positions WHERE opened_ts>=? AND status='closed' GROUP BY 1 ORDER BY tot", (cutoff,)):
         L.append(f"  {r['exit_reason']}: ×{r['c']} {r['tot']:+.4f} SOL")
 
-    top = conn.execute("SELECT symbol, ROUND(pnl_sol,4) pnl, ROUND(entry_price_usd/104*1e9,0) mc FROM positions WHERE opened_ts>=? AND status='closed' ORDER BY pnl_sol DESC LIMIT 1", (cutoff,)).fetchone()
+    top = conn.execute("SELECT symbol, ROUND(pnl_sol,4) pnl, ROUND(COALESCE(entry_price_sol,0)*1e9,0) mc FROM positions WHERE opened_ts>=? AND status='closed' ORDER BY pnl_sol DESC LIMIT 1", (cutoff,)).fetchone()
     if top:
         L.append(f"top runner: {top['symbol']} {top['pnl']:+.4f} SOL (entry {top['mc']:.0f} SOL)")
 

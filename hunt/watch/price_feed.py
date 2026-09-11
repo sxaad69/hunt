@@ -246,7 +246,7 @@ class PriceFeed:
         hb_last = -1
         while not stop_event.is_set():
             await asyncio.sleep(60)
-            line = f"[price-feed] hb: subs={len(self._sub_ids)} ticks={self.ticks_received} sol_usd={self.sol_usd:.2f}"
+            line = f"[price-feed] hb: subs={len(self._sub_ids)} ticks={self.ticks_received}"
             if self.ticks_received != hb_last or time.time() - last_info > 300:
                 logger.info(line)
                 last_info = time.time()
@@ -298,8 +298,6 @@ class PriceFeed:
         if not graduated:
             q.price_sol = price_sol
             q.mcap_sol = mcap_sol
-            if self.sol_usd > 0:
-                q.price_usd = price_sol * self.sol_usd
         elif mint not in self._amm_state:
             try:
                 asyncio.get_running_loop().create_task(self._promote_amm(mint))
@@ -408,8 +406,6 @@ class PriceFeed:
         q.graduated = True
         q.price_sol = price_sol
         q.mcap_sol = mcap_sol
-        if self.sol_usd > 0:
-            q.price_usd = price_sol * self.sol_usd
         self.ticks_received += 1
 
     async def _send_subscribe(self, pda: str):

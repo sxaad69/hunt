@@ -78,14 +78,14 @@ def _status_text() -> str:
 
 def _positions_text() -> str:
     rows = _db_rows(
-        "SELECT id, mode, symbol, size_sol, entry_price_usd, peak_price_usd, tp_tier"
+        "SELECT id, mode, symbol, size_sol, entry_price_sol, peak_price_sol, tp_tier"
         " FROM positions WHERE status='open' ORDER BY opened_ts DESC LIMIT 30")
     if not rows:
         return "no open positions"
     out = []
     for r in rows:
         out.append(f"#{r['id']} {r['mode']} {r['symbol']} size={r['size_sol']:.4f}"
-                   f" entry={r['entry_price_usd'] or 0:.3e} peak={r['peak_price_usd'] or 0:.3e}")
+                    f" entry={r['entry_price_sol'] or 0:.3e} peak={r['peak_price_sol'] or 0:.3e} SOL")
     return "\n".join(out)
 
 
@@ -182,23 +182,22 @@ async def run_paper_control(stop_event: asyncio.Event) -> None:
         if not auth(m):
             return
         try:
-            import httpx
-            from hunt.paper.run import _force_close, _live_exit_price, _sol_usd
-            from hunt.scout.dexscreener import DexScreener
+            from hunt.paper.run import FEED, _force_close
             rows = _db_rows("SELECT id, mint FROM positions WHERE mode='LIVE' AND status='open'")
             if not rows:
                 await m.answer("no open LIVE positions")
                 return
             n, failed = 0, 0
-            async with httpx.AsyncClient(timeout=20) as client:
-                ds = DexScreener(client)
-                for r in rows:
-                    px = await _live_exit_price(client, ds, r["mint"], True)
-                    if px <= 0:
-                        failed += 1
-                        continue
-                    await _force_close(r["id"], r["mint"], px, _sol_usd(), "telegram_close_all")
-                    n += 1
+            for r in rows:
+                px = 0.0
+                if FEED is not None:
+                    q = FEED.stale_quote(r["mint"], 600.0)
+                    px = q.price_sol if q else 0.0
+                if px <= 0:
+                    failed += 1
+                    continue
+                await _force_close(r["id"], r["mint"], px, 0.0, "telegram_close_all")
+                n += 1
             logger.warning("telegram /close_all: closed={} priceless={}", n, failed)
             await m.answer(f"close_all done: closed={n} no_price={failed}")
         except Exception as e:
