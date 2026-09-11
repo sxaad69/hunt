@@ -88,13 +88,19 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Gates**: dust floor ≥50 SOL · ceiling RE-ENABLED 2026-09-11 ≤3000 SOL species-A only (operator order for supervised live; was disabled 09-08 chasing B tails) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius curve ticks (exact, ~0–2% vs pump.fun indexer); GeckoTerminal fallback for graduated tokens
-- **Species-B REOPENED 2026-09-08 (decision)**: ceiling gate commented (`run.py`)
+- **Species-B REOPENED 2026-09-08 (decision, historical)**: ceiling gate commented (`run.py`)
   so USUR-class moonshots are huntable again. Evidence on both sides: (1) the
   post-grad tail is REAL (USUR: 151,926 SOL @90s, +50.31 SOL in 9 min; specb
   audit 27/40 continued, 0/40 underwater; **ZDOG 09-09: +4.68 SOL moon_bag_trail
   from a 13.5k SOL entry**); (2) the class median is a dump-factory (6 full-stake
   SLs 09-05, ex-USUR avg −0.0156/slot) and the birth→listing ramp is atomic
   (ROBIN replay) so entries are at the post-grad plateau.
+- **Species-B OUT of the LIVE entry universe since 2026-09-11** (operator order):
+  the ≤3000 SOL mcap ceiling (species-A only) is back ON in `run.py` for the supervised
+  live session, so instant-mega/USUR-class entries are rejected with `mcap_ceiling`.
+  The 09-08 reopen decision is NOT reversed permanently — the evidence review stands
+  (see below), but for THIS live session only species-A curve-stage rides ≤3000 SOL
+  are huntable. `specb_mcap_audit.py` keeps monitoring the class.
 - **SL-death measurement IN (2026-09-09, `audit/specb_sl_death.py`)**: population =
   all 802 species-B mints we saw in 48h; sniper/top10 gates still veto 729 (91%),
   so only **73 are playable**. Of those 73: **dusted (fold<0.2) = 31.5%** ← the
@@ -117,7 +123,9 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - Coins are born ~28 SOL ($3K) and often graduate to PumpSwap within minutes (curve zeroes out, price moves to AMM).
 - `base_decimals` varies (6 classic; stonkfun uses 9) — verify before price math on unknown programs.
 - Safety-net poll must run on its own clock — it starved once during launch bursts and missed launches.
-- Jupiter does NOT route bonding curves — curve entries need the pump program (deferred build).
+- Jupiter DOES route un-graduated bonding curves (2026-09-11 — see trap below); the old
+  "curve needs the pump program" rule is stale for NEW quotes. Curve entries still use the
+  pump program for the sell-echo path, but Jupiter-first is the entry route.
 - **`advanced-indexer.pump.fun/in-memory-coin` intel is UNRELIABLE (2026-09-11)**: returned
   clean `top10=0 / snipers=0 / dev_pct=0` for all 6 species-A ACCEPTs in the first live window
   (Rufus/Karen/RKC/GROK/CRISPE/TEDDY), but on-chain ground truth (`getTokenLargestAccounts`) shows
@@ -140,8 +148,8 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
   quote-mint family (WSOL/USDC/exotic) and the router emits the 26-account quote-aware pump CPI
   (buy disc `5df6823ce7e940b2`, 24-byte data). BUT full-bag coin→SOL sell routes often FAIL at the
   same sizes that buy routes pass — sell sizes must be sliced until the route fits the 1232-byte
-  wire cap with all ATAs pre-created. Update the "Jupiter does NOT route curves" bullet above → it
-  routes them, the platform just caps tx size.
+  wire cap with all ATAs pre-created. Combined with the safety-net trap above: Jupiter
+  routes curves now, the platform just caps tx size.
 
 ## Audit tooling (`audit/`)
 - `top_runners.py [hours]` — ranks today's ≥10x runners and classifies our response per coin:
@@ -182,13 +190,15 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - ✅ HARDENED 2026-09-10 (local, ready-to-test, NOT deployed): tier counts LIVE
   realized PnL · DexScreener last-resort exit for blind graduates (Apple −98% class) ·
   loss-cap guard screams on failure · buy/sell within-tick retry + fill-gap alert ·
-  single-instance lock + live_armed gate + Telegram control (`/status /positions /pnl
-  /pause /resume /close_all /kill`) + `status --reconcile` + regression tests.
-  Service stays OFF until the operator orders a test.
+  single-instance lock + live_armed gate + Telegram control (/status /positions /pnl
+  /pause /resume /close_all /kill) + status --reconcile + regression tests.
+  NOTE: the deployed live service has NO control bot — Telegram commands are dev-side only.
 - ✅ TRIAL-PROVEN 2026-09-10 (`tools/trial_roundtrip.py`, mmrich, 0.002 SOL):
   curve BUY (venue=curve) + curve SELL (venue=curve) round-trip executed with real fills,
   flat after. Sell path needed two fixes (see echo rule below); trial net ≈ −0.0005 SOL.
 - 7-day paper campaign on AWS, started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
-- Two runner species: A = classic curve rides (our edge), B = instant-mega launches (REOPENED 2026-09-08:
-  ceiling commented to chase USUR-class tails again — see species-B decision above; `specb_mcap_audit.py`
-  kept as monitor; next step = survival-agnostic SL-death measurement).
+- Two runner species: A = classic curve rides (our edge; the ONLY class in the live entry
+  universe this session, ≤3000 SOL by operator order) · B = instant-mega launches (REOPENED
+  2026-09-08, then OUT of live entries 2026-09-11 via the re-enabled mcap ceiling — see
+  species-B section above; `specb_mcap_audit.py` kept as monitor; next step = survival-agnostic
+  SL-death measurement).

@@ -174,7 +174,8 @@ TIER_TRIGGERS = [0.40, 0.60]
 TIER_FRACS = [0.50, 0.25]
 # (peak-multiple floor, trail-from-peak) — first matching row wins
 MOON_TRAIL_LADDER = [(0.0, 0.30), (3.0, 0.20), (10.0, 0.12), (50.0, 0.08)]
-MCAP_CEILING_SOL = 3000.0  # unused (ceiling commented 2026-09-08 to reopen species-B moonshot hunting)
+MCAP_CEILING_SOL = 3000.0  # RE-ENABLED 2026-09-11 (operator order): ≤3000 SOL, species-A only
+                           # for the supervised live session; species-B stays out via mcap_ceiling.
 
 SOL_USD = 150.0  # last-resort fallback; normally FEED.sol_usd (45s refresh)
 
