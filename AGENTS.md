@@ -1,34 +1,28 @@
 # AGENTS.md — hunt project notes for AI agents
 
 Memecoin paper-trading bot ("moonshot hunter") for pump.fun. Python/asyncio.
-Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
+Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 **Paper default (`HUNT_DRY_RUN=true`); live = `HUNT_DRY_RUN=false` + funded wallet key in `.env`. Never commit secrets.**
+**No live trading** until feeds/pricing are fixed and a Linode host exists. Operator order 2026-09-11.
 
 ## Golden rules
 - **Single instance**: only ONE hunt process runs the campaign at a time. Mac is standby.
-- **Paper default**: `HUNT_DRY_RUN=true` — pure paper (default, always). **Live** = `HUNT_DRY_RUN=false` + `HUNT_WALLET_PRIVATE_KEY` in `.env` (from SSM `/hunt/*`). Live starts fail-closed: preflight requires the wallet key and `balance >= live_min_balance_sol` (0.2), else the service exits WITHOUT trading. Flips to live only via `.env` on AWS — never an unplanned default. Always verify what mode a process started in before hardening decisions.
-- **Deploy flow (git ONLY)**: edit/test on Mac → `git push` → SSH to AWS → `sudo -iu hunt git pull` → `sudo systemctl restart hunt`.
+- **Paper default**: `HUNT_DRY_RUN=true` — pure paper (default, always). **Live** = `HUNT_DRY_RUN=false` + `HUNT_WALLET_PRIVATE_KEY` in `.env` on the Linode host. Live starts fail-closed: preflight requires the wallet key and `balance >= live_min_balance_sol` (0.2), else the service exits WITHOUT trading. Flips to live only via `.env` on Linode — never an unplanned default. Always verify what mode a process started in before hardening decisions.
+- **Deploy flow (git ONLY)**: edit/test on Mac → `git push` → SSH to Linode → `git pull` → restart hunt.
   NO scp, NO ad-hoc `/tmp/*.py` scripts — every diagnostic/operator tool lives in the repo (`audit/`, `tools/`)
-  and travels by git pull. (2026-09-10: 53 stray `/tmp` scripts archived to `/tmp/hunt_archive_20260910/`.)
-- **Env parity**: `./deploy/sync_env_local.sh` pulls AWS `.env` (all API keys + wallet key) to local `.env`
-  over the EICE tunnel and FORCES `HUNT_DRY_RUN=true` locally. Mac = dev/paper-only by construction;
-  live trading happens only on AWS. `.env` is gitignored on both sides — never commit it.
-- **Heavy files never in git**: DB, logs, state, backups go through S3 (`s3://hunt-state-362457597397-euc1`).
+  and travels by git pull.
+- **Env parity**: Mac `.env` is paper-locked (`HUNT_DRY_RUN=true`). Live trading happens only on Linode once a host exists and feeds are fixed. `.env` is gitignored — never commit it. Linode API token and wallet keys never go in this file or git.
+- **Heavy files never in git**: DB, logs, state stay on the Linode host (not git). Old AWS S3 (`s3://hunt-state-362457597397-euc1`) is historical only.
 - **Strategy changes**: max ONE evidence-backed tweak per day, logged in the daily digest. No blind tuning.
 - `.env` holds API keys — gitignored, never printed to logs.
 
 ## Where things run
-- **AWS**: EC2 `i-0d567877feac30c13`, t3.micro, eu-central-1b (Frankfurt), Ubuntu 24.04, user `hunt`, repo `/home/hunt/hunt`
-- **SSH** (no aws login needed):
-  `ssh -i ~/Documents/aws/hunt -o ProxyCommand="aws --profile hunt-deploy --region eu-central-1 ec2-instance-connect open-tunnel --instance-id i-0d567877feac30c13" ubuntu@172.31.38.120`
-- **Service**: `systemctl status hunt` (Restart=always) · logs: `/home/hunt/hunt/logs/hunt_YYYY-MM-DD.log` (UTC)
-- **Status helper**: `.venv/bin/python /home/hunt/hunt/status.py` (decisions/open/closed/pnl)
-- **Secrets**: SSM Parameter Store `/hunt/*` (SecureString) · state backups: S3 bucket above
-- **Monitoring identity**: IAM user `hunt-deploy` (scoped: EICE tunnel + describe only), profile `[hunt-deploy]`, keys never expire. Root `aws login` sessions expire in ~15 min — don't rely on them.
-- **Mac dev limits (2026-09-10, verified)**: this Mac's network NXDOMAINs `*.pump.fun`
-  (safety-net poll + in-memory-coin enrichment fail locally); PumpPortal WS, Helius RPC,
-  and DexScreener (with UA header) work. Local runs prove boot/gate/exit/shutdown + instruction
-  builders — AWS remains the full-fidelity runner.
+- **Linode (primary, 2026-09-11+)**: account `saadsuri67`. API v4 works. **No instance yet** (0 Linodes / volumes / IPs as of 2026-09-11). SSH key on Mac: `~/.ssh/linode_hermes`. Create a host before any remote campaign.
+- **AWS (DEAD)**: EC2 `i-0d567877feac30c13` **terminated 2026-09-11** (eu-central-1b). Do not SSH, restart, or deploy there. IAM `hunt-deploy` / SSM `/hunt/*` / S3 state are leftover — not the runtime.
+- **Mac**: dev + paper-only. `HUNT_DRY_RUN=true` always. VPN may be needed for `*.pump.fun`.
+- **Service** (once Linode exists): systemd `hunt` · logs under the repo `logs/hunt_YYYY-MM-DD.log` (UTC)
+- **Secrets**: `.env` on the Linode host (gitignored). Linode API token = operator-held, never in git / AGENTS.md / logs.
+- **Mac network (2026-09-10, verified; VPN can change this)**: without VPN this Mac NXDOMAINs `*.pump.fun`; PumpPortal WS, Helius RPC, and DexScreener (with UA header) work. Local runs prove boot/gate/exit/shutdown — Linode will be the full-fidelity runner.
 
 ## Architecture (key modules)
 - `hunt/paper/run.py` — the campaign engine: discovery queue, gate chain, entry pricing, open/exit wiring
@@ -39,10 +33,9 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - `hunt/paper/run.py::survival_filter` — gate chain (dust floor/ceiling, socials, model, intel, dev reputation)
 - `hunt/paper/run.py::_process_exit` — exit ladder (see strategy below)
 - `hunt/notify/` — Telegram alerts, control bot (`/status /positions /pnl /pause /kill`), daily digest
-- `deploy/` — systemd units, AWS setup scripts, DEPLOY.md
-- `tools/liquidate.py` — emergency sell-everything (AWS-only, needs `--confirm`)
-- `deploy/sync_env_local.sh` — pull AWS `.env` to Mac (forces paper mode)
-- `audit/top_runners.py` — daily "did we miss runners" audit (run on AWS: needs network + live decisions DB)
+- `deploy/` — systemd units; AWS setup scripts are historical (EC2 gone)
+- `tools/liquidate.py` — emergency sell-everything (Linode-only once live, needs `--confirm`)
+- `audit/top_runners.py` — daily "did we miss runners" audit (run on the campaign host: needs network + live decisions DB)
 - DB: SQLite at `hunt/data/hunt.sqlite3` — every decision stores intel (top10/holders/snipers/dev_pct/burst)
 
 ## LIVE mode (HUNT_DRY_RUN=false)
@@ -68,18 +61,15 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
   moon_bag_trail/force_close) include it (`close_ata=` in `LiveExecutor.sell`).
 - **Live sell failure = position KEPT open** (never phantom-closed) + Telegram alert; retries
   next tick.
-- **Emergency kill**: `touch hunt/data/kill_live` on AWS → next stops-poll force-closes ALL
+- **Emergency kill**: `touch hunt/data/kill_live` on Linode → next stops-poll force-closes ALL
   live positions and deletes the file. Restart to resume.
 - **Guardrails**: per-open balance check `size + live_min_balance_sol`, daily-loss cap
   `live_daily_loss_cap_sol` (0.5 SOL/UTC day → auto force-close ALL live + halt new opens),
   kill-file emergency close (no Telegram `/live` — the deployed service has no control bot).
-- **Deploy**: update `.env` on AWS (`deploy/gen_env.sh` pulls `HUNT_WALLET_PRIVATE_KEY` from
-  SSM `/hunt/HUNT_WALLET_PRIVATE_KEY`) → `systemctl restart hunt`. Funding wallet is generated
-  ON the instance (`python -m hunt.utils.solana gen-wallet`), never on Mac; the address is
-  given to the operator to fund ~1–2 SOL. The Mac holds a SYNCED COPY of the key
-  (`./deploy/sync_env_local.sh`) for parity only — local runs are paper-locked
-  (`HUNT_DRY_RUN=true` forced by the sync script), so the key can never trade from Mac.
-- **Emergency liquidation**: `sudo -u hunt .venv/bin/python tools/liquidate.py --confirm` on AWS
+- **Deploy**: update `.env` on Linode (wallet key lives only there) → restart hunt.
+  Funding wallet is generated ON the instance (`python -m hunt.utils.solana gen-wallet`), never on Mac.
+  Mac stays paper-locked (`HUNT_DRY_RUN=true`). Do not arm live until feeds/pricing are fixed.
+- **Emergency liquidation**: `tools/liquidate.py --confirm` on Linode
   sells EVERY nonzero token bag to SOL (full remainders, `close_ata=True`); without
   `--confirm` it only lists bags. Never scp one-off sell scripts.
 
@@ -87,7 +77,7 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
 - **Gates**: dust floor ≥50 SOL · ceiling RE-ENABLED 2026-09-11 ≤3000 SOL species-A only (operator order for supervised live; was disabled 09-08 chasing B tails) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
-- **Pricing**: Helius curve ticks (exact, ~0–2% vs pump.fun indexer); GeckoTerminal fallback for graduated tokens
+- **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after. Gecko/Jupiter are HTTP last-resort only.
 - **Species-B REOPENED 2026-09-08 (decision, historical)**: ceiling gate commented (`run.py`)
   so USUR-class moonshots are huntable again. Evidence on both sides: (1) the
   post-grad tail is REAL (USUR: 151,926 SOL @90s, +50.31 SOL in 9 min; specb
@@ -101,6 +91,8 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
   The 09-08 reopen decision is NOT reversed permanently — the evidence review stands
   (see below), but for THIS live session only species-A curve-stage rides ≤3000 SOL
   are huntable. `specb_mcap_audit.py` keeps monitoring the class.
+- **Paper 2026-09-11 BOTH entry classes**: curve 50–3000 SOL **and** post-grad AMM
+  (vault FDV ≥50, no ceiling). Live still frozen. Tracker `risk_7+` still vetoes.
 - **SL-death measurement IN (2026-09-09, `audit/specb_sl_death.py`)**: population =
   all 802 species-B mints we saw in 48h; sniper/top10 gates still veto 729 (91%),
   so only **73 are playable**. Of those 73: **dusted (fold<0.2) = 31.5%** ← the
@@ -119,23 +111,36 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - `accountSubscribe` pushes only on CHANGE — no initial state. Silence from dead curves is normal.
 - Helius free plan: `transactionSubscribe` paywalled; `accountSubscribe` fine; subscription cap ~40 (we manage).
 - PumpPortal: `subscribeNewToken` free; trade streams + trade API need a 0.02 SOL-funded key.
-- pump.fun API `market_cap` units: SOL for Solana coins, USD for EVM coins. Always verify.
+- **Single valuation truth (2026-09-11)**: dust/ceiling use on-chain curve FDV
+  (`(virtual_sol/1e9)*(supply/virtual_token)`). pump.fun API `market_cap` is log-only
+  (`[MCAPRELI]`). Missing curve → `mcap_unavailable`. Graduated/drained → `graduated`.
+  Never mix DexScreener USD mcap with SOL gates. API units: SOL for Solana coins, USD for EVM.
+- **Single intel truth (2026-09-11)**: top-10% of CIRCULATING supply via
+  `getTokenLargestAccounts` minus bonding-curve ATA (`hunt/paper/onchain_intel.py`).
+  `advanced-indexer.pump.fun/in-memory-coin` is `_dev` only — its top10/snipers/dev_pct
+  zeros were the Rufus false-clean. Missing measurement → `intel_unavailable`. Empty
+  holder list → None, never 0. Indexer `sniperCount` is NOT a gate (cannot see snipers
+  on-chain). Smart-boost cannot override `intel_unavailable` / `mcap_unavailable` /
+  `top10_heavy` / `graduated`.
+- **Tracker (2026-09-11)**: sniper gate = `snipers.totalPercentage > 20` (residual
+  holdings, not wallet count). Missing tracker/snipers object → `snipers_unavailable`.
+  Their 1–10 score is log-only (punishes un-graduated coins). `rugged` still vetoes.
+  Concentration = on-chain circulating top10 only.
+- Helius `price_usd` uses mint decimals from `getTokenSupply` (not hardcoded 6).
+  `mcap_sol` never needed decimals. `SOL_USD=150` last-resort FX is stale.
+  DexScreener `$0` on un-graduated coins is expected (no pair). Analysis of a signal
+  is at decision-time on-chain, never post-hoc Dex.
+- **NO LIVE** until paper soak proves gates match on-chain and operator orders it on Linode.
 - Coins are born ~28 SOL ($3K) and often graduate to PumpSwap within minutes (curve zeroes out, price moves to AMM).
 - `base_decimals` varies (6 classic; stonkfun uses 9) — verify before price math on unknown programs.
 - Safety-net poll must run on its own clock — it starved once during launch bursts and missed launches.
 - Jupiter DOES route un-graduated bonding curves (2026-09-11 — see trap below); the old
   "curve needs the pump program" rule is stale for NEW quotes. Curve entries still use the
   pump program for the sell-echo path, but Jupiter-first is the entry route.
-- **`advanced-indexer.pump.fun/in-memory-coin` intel is UNRELIABLE (2026-09-11)**: returned
-  clean `top10=0 / snipers=0 / dev_pct=0` for all 6 species-A ACCEPTs in the first live window
-  (Rufus/Karen/RKC/GROK/CRISPE/TEDDY), but on-chain ground truth (`getTokenLargestAccounts`) shows
-  98–100% top-10 supply and 53–100% dev-held for every one of them — all six are now dead dump-factories.
-  The SAME gates correctly vetoed `top10_heavy` 83× and `sniper_bundle` 73× on other coins, so the
-  endpoint is intermittently wrong, not uniformly broken. The `top10>75 / snipers>=2` vetoes (run.py
-  105-108) trust ONLY this indexer — no on-chain fallback. Does NOT consult on-chain distribution.
-  VERDICT: entry quality cannot be trusted from this source alone; ground-truth top-10% via
-  `getTokenLargestAccounts` before ANY live open (a "false-clean ACCEPT" became the Rufus phantom-close
-  wallet drain; live remains OPERATOR-PAUSED pending a gate fix).
+- **`advanced-indexer.pump.fun/in-memory-coin` is NOT a gate** (2026-09-11): it returned
+  clean `top10=0 / snipers=0 / dev_pct=0` for the first live-window ACCEPTs while on-chain
+  circulating top-10 (curve ATA excluded) is the only number we trust. Gates now fail-closed
+  (`intel_unavailable`) instead of treating indexer zeros as clean.
 - **Live sell must NEVER convert coins into an untracked quote mint mid-path** (2026-09-11, Rufus):
   the coin→quote→SOL chained sell left proceeds parked in the quote token when leg2 reverted
   (`Custom 6024`), then the engine's `raw_bal==0` shortcut closed the position at a fabricated full
@@ -153,8 +158,8 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Audit tooling (`audit/`)
 - `top_runners.py [hours]` — ranks today's ≥10x runners and classifies our response per coin:
-  POSITION taken / seen+REJECTED (with reason) / never seen. Run on AWS (network + live DB):
-  `cd /home/hunt/hunt && sudo -u hunt .venv/bin/python audit/top_runners.py 24`
+  POSITION taken / seen+REJECTED (with reason) / never seen. Run on the campaign host (network + live DB):
+  `.venv/bin/python audit/top_runners.py 24`
 - Methodology matters: a "missed moonshot" = seen at birth and dust-rejected. Giants first-seen above the
   ceiling are not misses. Zero gate-misses is the KPI (verified across 100+ runners so far).
 - `specb_mcap_audit.py [N] [hours] [min_x]` — specimen-B "real picture" monitor. Target list = pump.fun's
@@ -162,31 +167,30 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
   population we'd actually enter). For each target: `fold = current SOL mcap / DB 90s snapshot` (the
   listing/entry point). Sorted by fold → buckets: <0.2 dusted · 0.2–0.8 faded · 0.8–1.2 flat · >1.2
   continued · ≥5 ran away. Deliberately mcap-only (no on-chain replay; ~0 extra RPC — current mcap
-  already comes with the /coins fetch). Run on AWS:
-  `cd /home/hunt/hunt && sudo -u hunt .venv/bin/python audit/specb_mcap_audit.py 40 24 10`
+  already comes with the /coins fetch). Run on the campaign host:
+  `.venv/bin/python audit/specb_mcap_audit.py 40 24 10`
 - Caveat (by design): gainer-ranked = survivor-biased — dusted coins fall off rankings, so the SL-death
   class is INVISIBLE to this script; it sizes the upside, not the downside. Current mcap is also a lower
   bound (peak-then-dump missed).
 
 ## Monitoring
-- ZCode automation every 2h: AWS health + funnel + PnL via SSH; Mac standby check; auto-fix clear bugs.
+- Campaign host = Linode (once created). Mac = standby / paper.
 - 08:00 daily: full digest → Telegram (server-side timer also sends independently).
 - Telegram: real-time alerts (open/TP/SL/close) + control commands.
-- If SSH/monitoring fails with AWS auth errors: the bot runs fine on systemd — just note it.
 
 ## Current campaign state (update as things change)
-- ⛔ PAUSED 2026-09-11 (live session, no new opens): `hunt.service` ACTIVE in LIVE mode
-  (`.env HUNT_DRY_RUN=false`, `live_armed` set, no kill_live) but `paused` marker present —
-  new-open blocked, scanning/rejecting continues. Operator-paused after validation: all 6
+- ⛔ **AWS GONE 2026-09-11**: EC2 `i-0d567877feac30c13` terminated. Runtime moves to **Linode** (no instance yet).
+- ⛔ **NO LIVE TRADING** until feeds/pricing/intel are fixed once and for all, then operator order on a Linode host. Mac stays `HUNT_DRY_RUN=true`.
+- 📄 **This paper run (Mac, 2026-09-11)**: KPI = which ACCEPTs fire under on-chain mcap+top10 + Helius marks. So far 0 ACCEPT — coins that clear those gates die on SolanaTracker `risk_7+`. Log: `/tmp/hunt_paper_qa.log`.
+- ⛔ PAUSED 2026-09-11 (last AWS live session, historical): operator-paused after validation: all 6
   species-A ACCEPTs in the 23:16 window (Rufus/Karen/RKC/GROK/CRISPE/TEDDY) were false-clean
-  dumps (see intel trap above). Wallet flat 0.3243 SOL, 0 open, 0 bags. First live entry
+  dumps (see intel trap above). Wallet was flat 0.3243 SOL, 0 open, 0 bags. First live entry
   (Rufus, ven=amm, buy filled $5.58e-06/0.0545 SOL) proved the Jupiter-first buy fix;
-  its sell failed 12× then phantom-closed (now fixed — sell trap above). Resume ONLY after
-  a ground-truth on-chain top-10% gate fix + operator order.
+  its sell failed 12× then phantom-closed (now fixed — sell trap above).
 - ✅ SELL FIX DEPLOYED 2026-09-11 (`f2db50e`): `_sell_amm` = adaptive verified coin→WSOL
   slice sell (halve until Jupiter routes a ≤1232-byte tx; count a slice ONLY if SOL balance
   rose AND coins fell — never park value in quote, never phantom-close); `sell_now` refuses
-  to close a whole-balance exit that leaves coins behind. Tested: 25/25 local, live-active AWS.
+  to close a whole-balance exit that leaves coins behind. Tested: 25/25 local.
 - ✅ HARDENED 2026-09-10 (local, ready-to-test, NOT deployed): tier counts LIVE
   realized PnL · DexScreener last-resort exit for blind graduates (Apple −98% class) ·
   loss-cap guard screams on failure · buy/sell within-tick retry + fill-gap alert ·
@@ -196,7 +200,7 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - ✅ TRIAL-PROVEN 2026-09-10 (`tools/trial_roundtrip.py`, mmrich, 0.002 SOL):
   curve BUY (venue=curve) + curve SELL (venue=curve) round-trip executed with real fills,
   flat after. Sell path needed two fixes (see echo rule below); trial net ≈ −0.0005 SOL.
-- 7-day paper campaign on AWS, started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
+- 7-day paper campaign (was on AWS), started Sep 6 ~23:59 local. Baseline: 4h clean window +50 SOL (USUR 1431x).
 - Two runner species: A = classic curve rides (our edge; the ONLY class in the live entry
   universe this session, ≤3000 SOL by operator order) · B = instant-mega launches (REOPENED
   2026-09-08, then OUT of live entries 2026-09-11 via the re-enabled mcap ceiling — see

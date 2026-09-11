@@ -78,44 +78,42 @@ def survival_filter(coin: dict) -> tuple[bool, str]:
             # very thin curve - still allow but will be caught by survival model weight
             pass
     except: pass
-    # 2b. HARD VETO: dust mcap <50 is 90% losers (avg -$0.556, win 41% vs >=50 win 96.5%)
+    # 2b. MCAP: curve FDV or PumpSwap vault FDV. API market_cap is log-only.
+    # Curve (species-A): 50–3000 SOL. Graduated AMM (species-B): ≥50 SOL, no ceiling.
+    if not coin.get("_mcap_ok"):
+        return False, "mcap_unavailable"
     try:
         mc = float(coin.get("market_cap") or 0)
-        if mc is not None and mc < 50:
-            return False, f"dust_mcap_{mc:.0f}"
-        if mc >= 50:
-            # high enough to override no_socials — mcap>=50 alone is 96.5% win, no need for socials
-            # let it pass to model, but ensure it doesn't get rejected for no_socials
-            pass
-    except: pass
-    # 2d. MCAP CEILING: RE-ENABLED 2026-09-11 on explicit operator order
-    # (supervised live — "only species A"). Species-A = curve-stage classic
-    # rides entered <=3000 SOL. Species-B (instant-mega, USUR-class) stays
-    # OUT of the entry universe for this session; its 09-05 full-stake SL-death
-    # risk and post-grad plateau entries were why it was reopened-with-warning.
-    # Previous session (09-08—09-10) ran ceiling-DISABLED chasing B tails.
+    except (TypeError, ValueError):
+        return False, "mcap_unavailable"
+    if mc < 50:
+        return False, f"dust_mcap_{mc:.0f}"
+    if not coin.get("_graduated") and mc > MCAP_CEILING_SOL:
+        return False, f"mcap_ceiling_{mc:.0f}"
+    # 2e. top-10 of CIRCULATING supply (curve ATA excluded). Indexer zeros are
+    # not a pass. Missing measurement is a REJECT. Snipers are not gated here —
+    # getTokenLargestAccounts cannot see them; indexer sniperCount is the same
+    # feed that returned false-clean on Rufus.
+    if not coin.get("_intel_ok"):
+        return False, "intel_unavailable"
     try:
-        mc = float(coin.get("market_cap") or 0)
-        if mc > MCAP_CEILING_SOL:
-            return False, f"mcap_ceiling_{mc:.0f}"
-    except: pass
-    # 2e. distribution/bundle gates from in-memory-coin intel (fields provided
-    # by the decision-time enrichment; absent for poll-path coins -> no veto)
-    try:
-        if float(coin.get("_top10") or 0) > 75:
-            return False, "top10_heavy"
-        if int(coin.get("_snipers") or 0) >= 2:
-            return False, "sniper_bundle"
-    except: pass
-    # 2c. DEMAND GATE: require a recent trade (kill dead-on-arrival live-curve tokens
-    # that never pump — 13/42 SL losers had peak<=0% and no demand). 180s staleness veto.
+        top10 = float(coin["_top10"])
+    except (TypeError, ValueError, KeyError):
+        return False, "intel_unavailable"
+    if top10 > 75:
+        return False, f"top10_heavy_{top10:.0f}"
+    # 2c. DEMAND GATE: API last_trade_timestamp is the same unreliable feed as
+    # market_cap. Skip it when on-chain FDV already proves the curve is live
+    # (BERR 2026-09-11: $12.7K / 32.7% top10 killed by a 207s API stamp).
     try:
         ltt = coin.get("last_trade_timestamp")
-        if ltt:
+        mc = float(coin.get("market_cap") or 0)
+        if ltt and mc < 50:
             stale_s = (time.time()*1000 - float(ltt)) / 1000.0
             if stale_s > 180.0:
                 return False, f"stale_no_trade_{stale_s:.0f}s"
-    except: pass
+    except (TypeError, ValueError):
+        pass
     # 3. survival model (social + dead_hour + high_mcap weighted)
     try:
         from hunt.paper.survival_model import predict
@@ -346,23 +344,60 @@ def ensure_db():
 
 
 async def _coin_intel(client: httpx.AsyncClient, mint: str) -> dict:
-    """in-memory-coin: dev wallet + holder distribution + sniper count.
-    Also the only source of the creator address used for dev reputation."""
+    """On-chain circulating top-10 is the gate. Indexer is _dev only (reputation).
+
+    Never coerce a missing measurement to 0 — that was the Rufus false-clean.
+    """
+    intel: dict = {"_intel_ok": False, "_ocr": False, "_dev": ""}
     try:
         await _fetch_bucket.acquire()
         r = await client.get(f"https://advanced-indexer.pump.fun/in-memory-coin/{mint}", timeout=8)
         if r.status_code == 200:
             d = r.json()
-            return {
-                "_dev": d.get("dev") or "",
-                "_top10": float(d.get("top10HoldersPercent") or 0),
-                "_snipers": int(d.get("sniperCount") or 0),
-                "_holders": int(d.get("numHolders") or 0),
-                "_dev_pct": float(d.get("devHoldingsPercent") or 0),
-            }
+            intel["_dev"] = d.get("dev") or ""
+            intel["_idx_top10"] = float(d.get("top10HoldersPercent") or 0)
+            intel["_snipers"] = int(d.get("sniperCount") or 0)
+            intel["_holders"] = int(d.get("numHolders") or 0)
+            intel["_dev_pct"] = float(d.get("devHoldingsPercent") or 0)
     except Exception:
         pass
-    return {}
+    try:
+        from hunt.paper.onchain_intel import fetch_onchain_top10
+        pct = await fetch_onchain_top10(client, get_settings().rpc_http, mint)
+        if pct is None:
+            return intel
+        intel["_top10"] = pct
+        intel["_intel_ok"] = True
+        intel["_ocr"] = True
+        logger.info("intel on-chain {} top10={:.1f}% (circulating, curve excluded)", mint[:8], pct)
+    except Exception as e:
+        logger.debug("on-chain intel failed {}: {}", mint[:8], e)
+    return intel
+
+
+def _fdv_from_payload(coin: dict) -> tuple[float | None, bool] | None:
+    """FDV from /coins virtual reserves when present. Same formula as on-chain."""
+    try:
+        if coin.get("complete") is True:
+            return None, True
+        vs = int(coin.get("virtual_sol_reserves") or 0)
+        vt = int(coin.get("virtual_token_reserves") or 0)
+        supply = int(coin.get("total_supply") or coin.get("token_total_supply") or 0)
+        if vs <= 0 or vt <= 0 or supply <= 0:
+            return None
+        from hunt.paper.onchain_intel import curve_fdv_sol
+        return curve_fdv_sol(vs, vt, supply), False
+    except (TypeError, ValueError):
+        return None
+
+
+async def _onchain_mcap(client: httpx.AsyncClient, mint: str) -> tuple[float | None, bool] | None:
+    """On-chain curve FDV in SOL. None = unreadable. graduated=True → FDV is None."""
+    try:
+        from hunt.paper.onchain_intel import fetch_curve_mcap
+        return await fetch_curve_mcap(client, get_settings().rpc_http, mint)
+    except Exception:
+        return None
 
 
 async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
@@ -388,21 +423,12 @@ async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
 
 async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = None) -> bool:
     try:
-        # ENTRY PRICE — order (evidence 2026-09-10): Jupiter buy-route price is
-        # the primary source since the live buy now routes through Jupiter for
-        # every quote-mint family (WSOL/USDC/exotic). Feed is tick-exact but
-        # blind on un-graduated exotic-quote coins; curve-reserve math is the
-        # deterministic fallback; Gecko is last-resort for graduated coins.
+        # ENTRY MARK = Helius WS (curve, or PumpSwap vaults if graduated).
+        # Jupiter is the LIVE fill router, not the mark. Gecko is last resort.
         price_usd = 0.0
         client = ds.client if ds else httpx.AsyncClient(timeout=10)
-        try:
-            price_usd = await _jup_entry_price(client, mint, _sol_usd())
-            if price_usd > 0:
-                logger.info("entry price via jup route {} {} = ${:.6f}", mint[:8], symbol, price_usd)
-        except Exception as e:
-            logger.debug("jup entry price failed {} {}: {}", mint[:8], symbol, e)
-        if price_usd <= 0 and FEED is not None:
-            q = FEED.quote(mint, max_age_s=60.0)
+        if FEED is not None:
+            q = await FEED.ensure_priced(mint)
             if q and q.price_usd > 0:
                 price_usd = q.price_usd
         if price_usd <= 0:
@@ -421,15 +447,6 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             try:
                 price_usd = await _price_for_mint_fallback(client, mint)
             except: pass
-        if price_usd <= 0 and FEED is not None:
-            # subscribe — helius pushes the current curve state immediately
-            await FEED.subscribe(mint)
-            for _ in range(4):
-                await asyncio.sleep(0.25)
-                q = FEED.quote(mint, max_age_s=30.0)
-                if q and q.price_usd > 0:
-                    price_usd = q.price_usd
-                    break
         if price_usd <= 0:
             _notify(f"⚠️ NO ENTRY PRICE {symbol} {mint[:8]} — gated ACCEPT but all price sources blind, skipped")
             logger.info("no entry price for {} {} — skipping accepted candidate", mint[:8], symbol)
@@ -878,11 +895,11 @@ async def paper_stops_loop(stop_event: asyncio.Event):
             if FEED is not None:
                 open_mints = {p["mint"] for p in positions}
                 for m in open_mints:
-                    await FEED.subscribe(m)
+                    await FEED.ensure_priced(m)
                 for m in await FEED.subscribed_mints():
                     if m not in open_mints:
                         await FEED.unsubscribe(m)
-            # only poll mints not recently covered by ws
+            # HTTP poll only if Helius still hasn't ticked this mint
             uncovered = [p for p in positions if now - _last_ws_ts.get(p["mint"], 0) > _poll_s]
             from hunt.exec.live import get_live_executor as _gle
             _ex = _gle()
@@ -936,12 +953,59 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
     safety-net poll."""
     mint = coin["mint"]
     symbol = coin.get("symbol") or "?"
-    # holder/dev intel for EVERY decision path (stream waitlist AND safety poll)
-    # — the learning set: winners vs losers launch fingerprints live in these fields
-    if "_top10" not in coin:
+    api_mc = 0.0
+    try:
+        api_mc = float(coin.get("market_cap") or 0)
+    except (TypeError, ValueError):
+        api_mc = 0.0
+    got = _fdv_from_payload(coin)
+    if got is None:
+        got = await _onchain_mcap(client, mint)
+    if got is None:
+        coin["_mcap_ok"] = False
+        logger.info("[MCAPRELI] {} {} api={:.0f} onchain=NO_CURVE/err", symbol, mint, api_mc)
+    else:
+        on_mc, on_grad = got
+        if on_grad:
+            coin["_graduated"] = True
+            pool = coin.get("pool_address") or ""
+            if not pool:
+                try:
+                    r = await client.get(f"{API}/{mint}", timeout=8)
+                    if r.status_code == 200:
+                        pool = (r.json() or {}).get("pool_address") or ""
+                        coin["pool_address"] = pool
+                except Exception:
+                    pool = ""
+            amm_mc = None
+            if pool:
+                try:
+                    from hunt.paper.onchain_intel import fetch_amm_mcap
+                    amm_mc = await fetch_amm_mcap(client, get_settings().rpc_http, pool)
+                except Exception:
+                    amm_mc = None
+            if amm_mc and amm_mc > 0:
+                coin["_mcap_ok"] = True
+                coin["market_cap"] = amm_mc
+                logger.info("[MCAPRELI] {} {} api={:.0f} AMM={:.1f} SOL", symbol, mint, api_mc, amm_mc)
+            else:
+                coin["_mcap_ok"] = False
+                logger.info("[MCAPRELI] {} {} api={:.0f} GRADUATED no AMM mark", symbol, mint, api_mc)
+        elif on_mc is None or on_mc <= 0:
+            coin["_mcap_ok"] = False
+            logger.info("[MCAPRELI] {} {} api={:.0f} onchain=drained", symbol, mint, api_mc)
+        else:
+            coin["_mcap_ok"] = True
+            coin["market_cap"] = on_mc
+            ratio = (api_mc / on_mc) if on_mc > 0 else 0.0
+            logger.info("[MCAPRELI] {} {} api={:.0f} onchain={:.1f} SOL (api/onchain={:.1f}x)",
+                        symbol, mint, api_mc, on_mc, ratio)
+    mc_now = float(coin.get("market_cap") or 0)
+    playable = coin.get("_mcap_ok") and mc_now >= 50.0 and (
+        coin.get("_graduated") or mc_now <= MCAP_CEILING_SOL)
+    if playable and not coin.get("_intel_ok"):
         intel = await _coin_intel(client, mint)
-        if intel:
-            coin.update(intel)
+        coin.update(intel)
     accept, reason = survival_filter(coin)
     created_ts = int(coin.get("created_timestamp") or 0) // 1000
     now = int(time.time())
@@ -974,10 +1038,14 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
         from hunt.utils.smart_wallet import check_smart_buy
         is_smart, who = await check_smart_buy(mint)
         if is_smart and not accept:
-            # boost: if survival_filter rejected but smart wallet bought, flip to accept
-            accept = True
-            reason = f"smart_boost_{who}"
-            smart_reason = who
+            locked = reason.startswith((
+                "intel_unavailable", "mcap_unavailable", "top10_heavy", "graduated",
+                "snipers_", "rugged",
+            ))
+            if not locked:
+                accept = True
+                reason = f"smart_boost_{who}"
+                smart_reason = who
         elif is_smart:
             reason = f"{reason}+smart_{who}"
     except: pass
@@ -988,14 +1056,13 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
             from hunt.utils.solanatracker import check_risk
             ok_risk, tracker_reason = await check_risk(mint, client)
             if not ok_risk:
-                # but if smart wallet, don't veto on risk alone (let it ride)
-                if smart_reason:
-                    tracker_reason = f"risk_{tracker_reason}_overridden_by_smart"
-                else:
-                    accept = False
-                    reason = tracker_reason
+                accept = False
+                reason = tracker_reason
+            elif tracker_reason:
+                reason = f"{reason}+{tracker_reason}"
         except Exception:
-            pass
+            accept = False
+            reason = "snipers_unavailable"
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute(SCHEMA)
