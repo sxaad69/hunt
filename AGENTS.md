@@ -17,7 +17,7 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 - `.env` holds API keys — gitignored, never printed to logs.
 
 ## Where things run
-- **Linode (primary, 2026-09-11+)**: account `saadsuri67`. API v4 works. **No instance yet** (0 Linodes / volumes / IPs as of 2026-09-11). SSH key on Mac: `~/.ssh/linode_hermes`. Create a host before any remote campaign.
+- **Linode (primary, 2026-09-11+)**: account `saadsuri67`. Instance `hunt` id `104905707`, **eu-central** (Frankfurt), type **g6-standard-1** (2GB/1 vCPU — AWS t3.micro was 1GB; 2GB so Python+Helius WS does not OOM). IPv4 `172.105.93.126`. SSH: `ssh -i ~/.ssh/linode_hermes root@172.105.93.126` (then `sudo -iu hunt`). Ubuntu 24.04, user `hunt`, repo `/home/hunt/hunt`, systemd `hunt`, **paper** (`HUNT_DRY_RUN=true`). Fresh DB on host — do not scp Mac sqlite/logs.
 - **AWS (DEAD)**: EC2 `i-0d567877feac30c13` **terminated 2026-09-11** (eu-central-1b). Do not SSH, restart, or deploy there. IAM `hunt-deploy` / SSM `/hunt/*` / S3 state are leftover — not the runtime.
 - **Mac**: dev + paper-only. `HUNT_DRY_RUN=true` always. VPN may be needed for `*.pump.fun`.
 - **Service** (once Linode exists): systemd `hunt` · logs under the repo `logs/hunt_YYYY-MM-DD.log` (UTC)
