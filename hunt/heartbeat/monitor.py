@@ -10,8 +10,8 @@ async def heartbeat_loop(stop_event: asyncio.Event, interval_s: int = 60):
             logger.info("heartbeat tier={} pnl={:+.4f} SOL poll={} max_open={}", data["tier"], data["pnl_sol"], data["tier_cfg"]["poll_interval_s"], data["tier_cfg"]["max_open"])
             # self-mod: if critical, log warning like automaton low_compute
             if data["tier"] == "critical":
-                logger.warning("CRITICAL tier — size={} max_open={} (filter mcap unchanged)",
-                               data["tier_cfg"]["trade_size_sol"], data["tier_cfg"]["max_open"])
+                logger.debug("CRITICAL tier — size={} max_open={}",
+                             data["tier_cfg"]["trade_size_sol"], data["tier_cfg"]["max_open"])
             if data["tier"] == "dead":
                 logger.error("DEAD tier — halting buys")
         except Exception as e:
