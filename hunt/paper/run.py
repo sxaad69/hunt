@@ -827,8 +827,10 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
 async def price_ws_loop(stop_event: asyncio.Event):
     """Helius accountSubscribe — SOL ticks. No FX poll."""
     global FEED
+    global FEED
     from hunt.paper.execq import offer_tick
-    FEED = PriceFeed(on_tick=lambda mint, q: offer_tick(mint, q.price_sol))
+    if FEED is None:
+        FEED = PriceFeed(on_tick=lambda mint, q: offer_tick(mint, q.price_sol))
     await FEED.run(stop_event)
 
 
@@ -1256,6 +1258,10 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
     from hunt.paper.smart_seed import smart_seed_loop
     from hunt.watch.discovery_ws import new_tokens_loop
     execq_init()
+    from hunt.paper.execq import offer_tick as _offer_tick
+    global FEED
+    if FEED is None:
+        FEED = PriceFeed(on_tick=lambda mint, q: _offer_tick(mint, q.price_sol))
     stop_evt = asyncio.Event()
     tick_task = asyncio.create_task(tick_workers(stop_evt, 4))
     open_task = asyncio.create_task(open_worker(stop_evt, stats))
