@@ -487,11 +487,15 @@ async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
 
 async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = None) -> bool:
     try:
-        # ENTRY MARK = Helius price_sol (curve or PumpSwap vaults). No FX.
+        logger.info("opening {} {}", mint[:8], symbol)
         price_sol = 0.0
         client = ds.client if ds else httpx.AsyncClient(timeout=10)
         if FEED is not None:
-            q = await FEED.ensure_priced(mint)
+            try:
+                q = await asyncio.wait_for(FEED.ensure_priced(mint), timeout=8.0)
+            except asyncio.TimeoutError:
+                logger.warning("ensure_priced timeout {} {}", mint[:8], symbol)
+                q = None
             if q and q.price_sol > 0:
                 price_sol = q.price_sol
         if price_sol <= 0:
@@ -515,7 +519,7 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             _notify(f"⛔ LIVE DAILY LOSS CAP REACHED — no new live opens until restart/reset")
             return False
         # check existing open
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         cur = conn.execute("SELECT 1 FROM positions WHERE mint=? AND mode=? AND status='open' LIMIT 1", (mint, mode))
         if cur.fetchone():
             conn.close()

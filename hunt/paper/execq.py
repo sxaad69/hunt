@@ -91,8 +91,10 @@ async def open_worker(stop_event: asyncio.Event, stats: dict) -> None:
         except Exception:
             continue
         try:
+            logger.info("open_worker got {} {}", mint[:8], symbol)
             ok = await open_paper_position(mint, symbol, ds)
+            logger.info("open_worker done {} {} ok={}", mint[:8], symbol, ok)
             if ok:
                 stats["opened"] += 1
         except Exception as e:
-            logger.debug("exec open {}: {}", mint[:8], e)
+            logger.warning("exec open {}: {}", mint[:8], e)
