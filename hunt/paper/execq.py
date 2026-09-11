@@ -9,10 +9,16 @@ _tick_q: asyncio.Queue | None = None
 _open_q: asyncio.Queue | None = None
 _locks: dict[str, asyncio.Lock] = {}
 _sem: asyncio.Semaphore | None = None
+_handle_tick = None
+_handle_open = None
 
 
-def init() -> None:
-    global _tick_q, _open_q, _sem
+def init(handle_tick=None, handle_open=None) -> None:
+    global _tick_q, _open_q, _sem, _handle_tick, _handle_open
+    if handle_tick is not None:
+        _handle_tick = handle_tick
+    if handle_open is not None:
+        _handle_open = handle_open
     if _tick_q is None:
         _tick_q = asyncio.Queue(maxsize=4000)
         _open_q = asyncio.Queue(maxsize=200)
@@ -49,7 +55,6 @@ def offer_open(mint: str, symbol: str, ds) -> None:
 
 
 async def tick_workers(stop_event: asyncio.Event, n: int = 4) -> None:
-    from hunt.paper.run import _handle_price_update
     logger.info("tick_workers n={}", n)
 
     async def worker():
@@ -60,11 +65,14 @@ async def tick_workers(stop_event: asyncio.Event, n: int = 4) -> None:
                 continue
             except Exception:
                 continue
+            fn = _handle_tick
+            if fn is None:
+                continue
             lock = _locks.setdefault(mint, asyncio.Lock())
             async with _sem:
                 async with lock:
                     try:
-                        await _handle_price_update(mint, px)
+                        await fn(mint, px)
                     except Exception as e:
                         logger.debug("exec tick {}: {}", mint[:8], e)
 
@@ -77,11 +85,6 @@ async def tick_workers(stop_event: asyncio.Event, n: int = 4) -> None:
 
 
 async def open_worker(stop_event: asyncio.Event, stats: dict) -> None:
-    try:
-        from hunt.paper.run import open_paper_position
-    except Exception as e:
-        logger.error("open_worker cannot import open_paper_position: {}", e)
-        return
     logger.info("open_worker live")
     while not stop_event.is_set():
         try:
@@ -90,9 +93,13 @@ async def open_worker(stop_event: asyncio.Event, stats: dict) -> None:
             continue
         except Exception:
             continue
+        fn = _handle_open
+        if fn is None:
+            logger.warning("open_worker no handle_open")
+            continue
         try:
             logger.info("open_worker got {} {}", mint[:8], symbol)
-            ok = await open_paper_position(mint, symbol, ds)
+            ok = await fn(mint, symbol, ds)
             logger.info("open_worker done {} {} ok={}", mint[:8], symbol, ok)
             if ok:
                 stats["opened"] += 1

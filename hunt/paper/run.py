@@ -1169,7 +1169,7 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
     global _NOTIFIER, FEED, _RUN_END_TS
     ensure_db()
     from hunt.paper.execq import init as execq_init, offer_tick as _offer_tick
-    execq_init()
+    execq_init(handle_tick=_handle_price_update, handle_open=open_paper_position)
     if FEED is None:
         FEED = PriceFeed(on_tick=lambda mint, q: _offer_tick(mint, q.price_sol))
     from hunt.config import get_settings
