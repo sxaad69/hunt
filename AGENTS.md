@@ -77,7 +77,9 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
 - **Gates**: dust floor ≥50 SOL · ceiling RE-ENABLED 2026-09-11 ≤3000 SOL species-A only (operator order for supervised live; was disabled 09-08 chasing B tails) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
-- **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after. Gecko/Jupiter are HTTP last-resort only.
+- **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after.
+  Ladder is **SOL-native** (`price_sol` / `entry_price_sol` / `peak_price_sol`). No 45s SOL/USD poll.
+  Telegram may fetch Dex/Gecko FX **on notify only**. Gecko/Jupiter are not marks.
 - **Species-B REOPENED 2026-09-08 (decision, historical)**: ceiling gate commented (`run.py`)
   so USUR-class moonshots are huntable again. Evidence on both sides: (1) the
   post-grad tail is REAL (USUR: 151,926 SOL @90s, +50.31 SOL in 9 min; specb

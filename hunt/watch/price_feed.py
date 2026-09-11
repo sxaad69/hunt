@@ -30,7 +30,6 @@ PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 # (dead curves trade zero times, so silence is NORMAL — only reconnect when a
 # connection that should be receiving traffic stays silent far too long)
 IDLE_RECONNECT_S = 240.0
-SOL_REFRESH_S = 45.0
 # soft cap — free Helius plans cap active websocket subscriptions per key
 MAX_SUBSCRIPTIONS = 40
 
@@ -113,14 +112,13 @@ class PriceFeed:
     # ---- public API -------------------------------------------------
     def quote(self, mint: str, max_age_s: float = 10.0) -> Quote | None:
         q = self._quotes.get(mint)
-        if q and q.price_usd > 0 and q.ts > 0 and time.time() - q.ts <= max_age_s:
+        if q and q.price_sol > 0 and q.ts > 0 and time.time() - q.ts <= max_age_s:
             return q
         return None
 
     def stale_quote(self, mint: str, max_age_s: float = 600.0) -> Quote | None:
-        """Last known price within max_age_s — better than nothing for exits."""
         q = self._quotes.get(mint)
-        if q and q.price_usd > 0 and q.ts > 0 and time.time() - q.ts <= max_age_s:
+        if q and q.price_sol > 0 and q.ts > 0 and time.time() - q.ts <= max_age_s:
             return q
         return None
 
@@ -135,7 +133,7 @@ class PriceFeed:
         if q and q.graduated:
             await self._promote_amm(mint, pool_address)
             q = self._quotes.get(mint)
-        if q and q.price_usd > 0 and q.ts > 0:
+        if q and q.price_sol > 0 and q.ts > 0:
             return q
         return self.stale_quote(mint, 300.0)
 
@@ -200,7 +198,6 @@ class PriceFeed:
 
     async def run(self, stop_event: asyncio.Event):
         """Main loop; reconnects forever until stop_event is set."""
-        sol_task = asyncio.create_task(self._sol_loop(stop_event))
         hb_task = asyncio.create_task(self._heartbeat(stop_event))
         backoff = 2.0
         while not stop_event.is_set():
@@ -240,18 +237,9 @@ class PriceFeed:
             except asyncio.TimeoutError:
                 pass
             backoff = min(backoff * 1.7, 60.0)
-        sol_task.cancel()
         hb_task.cancel()
 
     # ---- internals ---------------------------------------------------
-    async def _sol_loop(self, stop_event: asyncio.Event):
-        while not stop_event.is_set():
-            await self.refresh_sol_usd()
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=SOL_REFRESH_S)
-            except asyncio.TimeoutError:
-                pass
-
     async def _heartbeat(self, stop_event: asyncio.Event):
         """Periodic visibility into feed health for monitoring."""
         last_info = 0.0

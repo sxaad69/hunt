@@ -2,9 +2,9 @@
 import struct
 
 from hunt.paper.onchain_intel import circulating_top10_pct, curve_fdv_sol, protocol_token_accounts
-from hunt.paper.run import survival_filter, _fdv_from_payload
+from hunt.paper.run import _entry_sol, _fdv_from_payload, survival_filter
 from hunt.utils.solanatracker import verdict_from_risk
-from hunt.watch.price_feed import amm_price_sol, parse_curve_quote, parse_spl_amount
+from hunt.watch.price_feed import Quote, amm_price_sol, parse_curve_quote, parse_spl_amount
 
 
 def _coin(**kw):
@@ -117,6 +117,22 @@ def test_parse_curve_quote_fdv_and_graduated():
     assert abs(m6 - m9) < 1e-9
     assert abs(p9 / p6 - 1000) < 1
 
+
+
+def test_entry_sol_from_bag_without_fx():
+    class P(dict):
+        def __getitem__(self, k):
+            return dict.__getitem__(self, k)
+    pos = {"entry_price_sol": None, "tokens": 10.0, "size_sol": 0.05}
+    assert abs(_entry_sol(pos) - 0.005) < 1e-12
+    pos["entry_price_sol"] = 0.002
+    assert abs(_entry_sol(pos) - 0.002) < 1e-12
+
+
+def test_quote_valid_without_usd():
+    q = Quote(mint="x", price_sol=2.8e-8, price_usd=0.0, ts=1e12)
+    assert q.price_sol > 0
+    assert q.price_usd == 0.0
 
 
 def test_snipers_pct_not_count():

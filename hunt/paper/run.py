@@ -175,9 +175,9 @@ MOON_TRAIL_LADDER = [(0.0, 0.30), (3.0, 0.20), (10.0, 0.12), (50.0, 0.08)]
 MCAP_CEILING_SOL = 3000.0  # RE-ENABLED 2026-09-11 (operator order): ≤3000 SOL, species-A only
                            # for the supervised live session; species-B stays out via mcap_ceiling.
 
-SOL_USD = 150.0  # last-resort fallback; normally FEED.sol_usd (45s refresh)
-
 _NOTIFIER = None  # telegram alerts, started in run_paper
+_fx_ts = 0.0
+_fx_px = 0.0
 
 
 def _notify(text: str):
@@ -189,10 +189,43 @@ def _notify(text: str):
             pass
 
 
-def _sol_usd() -> float:
-    if FEED is not None and FEED.sol_usd > 0:
-        return FEED.sol_usd
-    return SOL_USD if SOL_USD > 0 else 150.0
+async def _fx_usd_for_notify() -> float:
+    """On-demand SOL/USD for Telegram only. Not a feed. 60s memo."""
+    global _fx_ts, _fx_px
+    now = time.time()
+    if _fx_px > 0 and now - _fx_ts < 60:
+        return _fx_px
+    if FEED is not None:
+        try:
+            await FEED.refresh_sol_usd()
+            if FEED.sol_usd > 0:
+                _fx_ts, _fx_px = now, FEED.sol_usd
+                return _fx_px
+        except Exception:
+            pass
+    return _fx_px if _fx_px > 0 else 0.0
+
+
+def _entry_sol(pos) -> float:
+    try:
+        v = pos["entry_price_sol"]
+        if v and float(v) > 0:
+            return float(v)
+    except (KeyError, IndexError, TypeError):
+        pass
+    tokens = float(pos["tokens"] or 0)
+    size = float(pos["size_sol"] or 0)
+    return (size / tokens) if tokens > 0 else 0.0
+
+
+def _peak_sol(pos, entry: float) -> float:
+    try:
+        v = pos["peak_price_sol"]
+        if v and float(v) > 0:
+            return float(v)
+    except (KeyError, IndexError, TypeError):
+        pass
+    return entry
 
 
 _fetch_bucket = RateLimiter(1.2, 6)  # shared limiter for pump.fun frontend calls
@@ -326,11 +359,21 @@ def ensure_db():
     from hunt.db.database import SCHEMA as MAIN_SCHEMA
     conn.executescript(MAIN_SCHEMA)
     # add tiered-exit columns if missing
-    for col in ("tp_tier INTEGER NOT NULL DEFAULT 0", "realized_sol REAL NOT NULL DEFAULT 0", "decimals INTEGER NOT NULL DEFAULT 6", "mode TEXT NOT NULL DEFAULT 'PAPER'"):
+    for col in ("tp_tier INTEGER NOT NULL DEFAULT 0", "realized_sol REAL NOT NULL DEFAULT 0", "decimals INTEGER NOT NULL DEFAULT 6", "mode TEXT NOT NULL DEFAULT 'PAPER'",
+                "entry_price_sol REAL", "peak_price_sol REAL"):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col}")
         except Exception:
             pass
+    for r in conn.execute("SELECT id, size_sol, tokens, entry_price_usd, peak_price_usd FROM positions WHERE status='open' AND (entry_price_sol IS NULL OR entry_price_sol=0)"):
+        pid, size, tokens, e_usd, p_usd = r
+        if tokens and tokens > 0 and size:
+            entry_sol = float(size) / float(tokens)
+            peak_sol = entry_sol
+            if e_usd and float(e_usd) > 0 and p_usd:
+                peak_sol = entry_sol * (float(p_usd) / float(e_usd))
+            conn.execute("UPDATE positions SET entry_price_sol=?, peak_price_sol=? WHERE id=?",
+                         (entry_sol, peak_sol, pid))
     # learning-loop columns (dev reputation + burst shape + holder intel)
     for col in ("dev TEXT", "burst TEXT", "top10 REAL", "snipers INTEGER", "holders INTEGER", "dev_pct REAL"):
         try:
@@ -423,35 +466,17 @@ async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
 
 async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = None) -> bool:
     try:
-        # ENTRY MARK = Helius WS (curve, or PumpSwap vaults if graduated).
-        # Jupiter is the LIVE fill router, not the mark. Gecko is last resort.
-        price_usd = 0.0
+        # ENTRY MARK = Helius price_sol (curve or PumpSwap vaults). No FX.
+        price_sol = 0.0
         client = ds.client if ds else httpx.AsyncClient(timeout=10)
         if FEED is not None:
             q = await FEED.ensure_priced(mint)
-            if q and q.price_usd > 0:
-                price_usd = q.price_usd
-        if price_usd <= 0:
-            # deterministic curve-reserve price (no RPC stream needed), using the
-            # quote mint's SOL value via a probe route when exotic.
-            try:
-                from hunt.exec.live import get_live_executor as _gle2
-                _ex2 = _gle2()
-                if _ex2 is not None:
-                    price_usd = await _curve_reserve_entry_price(_ex2, client, mint, _sol_usd())
-                    if price_usd > 0:
-                        logger.info("entry price via curve reserve {} {} = ${:.6f}", mint[:8], symbol, price_usd)
-            except Exception as e:
-                logger.debug("curve-reserve entry price failed {} {}: {}", mint[:8], symbol, e)
-        if price_usd <= 0:
-            try:
-                price_usd = await _price_for_mint_fallback(client, mint)
-            except: pass
-        if price_usd <= 0:
-            _notify(f"⚠️ NO ENTRY PRICE {symbol} {mint[:8]} — gated ACCEPT but all price sources blind, skipped")
+            if q and q.price_sol > 0:
+                price_sol = q.price_sol
+        if price_sol <= 0:
+            _notify(f"⚠️ NO ENTRY PRICE {symbol} {mint[:8]} — gated ACCEPT but Helius blind, skipped")
             logger.info("no entry price for {} {} — skipping accepted candidate", mint[:8], symbol)
             return False
-        sol_usd = _sol_usd()
         mode = _current_mode()
         from hunt.exec.live import get_live_executor
         ex = get_live_executor()
@@ -508,9 +533,7 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             tokens = r.tokens
             decimals = r.decimals
             _LIVE_DECIMALS[mint] = r.decimals
-            # anchor to the REAL execution price (fill can be far from the 90s
-            # judging snapshot on launch movers — a wrong entry breaks SL/TP/trail)
-            base_usd = (size_sol * sol_usd) / tokens if tokens > 0 else price_usd
+            base_sol = size_sol / tokens if tokens > 0 else price_sol
             # PAYUP GUARD: a fill far over pool is born below its own stop
             # (eL5f paid +38% on a $3k pool). Reverse it, don't record it.
             if ds is not None:
@@ -520,10 +543,12 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
                     pool_px = 0.0
                 if pool_px > 0:
                     from hunt.config import get_settings as _gs5
-                    over = base_usd / pool_px - 1
-                    if over > float(_gs5().live_entry_payup_guard_pct or 15) / 100:
+                    fx = await _fx_usd_for_notify()
+                    fill_usd = base_sol * fx if fx > 0 else 0.0
+                    over = (fill_usd / pool_px - 1) if (pool_px > 0 and fill_usd > 0) else 0.0
+                    if fill_usd > 0 and over > float(_gs5().live_entry_payup_guard_pct or 15) / 100:
                         logger.warning("payup guard reversing {} fill ${:.3e} {:.0f}% over pool ${:.3e}",
-                                       mint[:8], base_usd, over * 100, pool_px)
+                                       mint[:8], fill_usd, over * 100, pool_px)
                         _notify(f"🛟 PAYUP GUARD {symbol}: fill {over*100:.0f}% over pool — reversing, no position")
                         rb = await ex.sell(mint, int(r.tokens_raw))
                         if rb and rb.ok:
@@ -534,33 +559,31 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
                         _notify(f"🛟 PAYUP GUARD {symbol}: reverse FAILED, position recorded (SL manages it)")
                 else:
                     logger.info("payup guard skipped (no pool price) {}", mint[:8])
-            logger.info("LIVE open {} {} @${:.6g} size {} SOL venue={} sig={}", mint[:8], symbol, base_usd, size_sol, r.venue, r.signature)
+            logger.info("LIVE open {} {} @{} SOL/tok size {} SOL venue={} sig={}", mint[:8], symbol, base_sol, size_sol, r.venue, r.signature)
         else:
             decimals = 6
-            usd_in = size_sol * sol_usd
-            tokens = usd_in / price_usd
-            base_usd = price_usd
-        # create position
+            tokens = size_sol / price_sol
+            base_sol = price_sol
         conn.execute(
-            "INSERT INTO positions(opened_ts,mint,symbol,mode,size_sol,tokens,entry_price_usd,tp_pct,sl_pct,trail_pct,peak_price_usd,tp_tier,realized_sol,decimals) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (int(time.time()), mint, symbol, mode, size_sol, tokens, base_usd, 100.0, -30.0, 20.0, base_usd, 0, 0.0, decimals),
+            "INSERT INTO positions(opened_ts,mint,symbol,mode,size_sol,tokens,entry_price_usd,tp_pct,sl_pct,trail_pct,peak_price_usd,tp_tier,realized_sol,decimals,entry_price_sol,peak_price_sol) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(time.time()), mint, symbol, mode, size_sol, tokens, 0.0, 100.0, -30.0, 20.0, 0.0, 0, 0.0, decimals, base_sol, base_sol),
         )
         conn.execute(
             "INSERT INTO trades(ts,position_id,mode,side,mint,symbol,amount_sol,token_amount,price_usd,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (int(time.time()), conn.execute("SELECT last_insert_rowid()").fetchone()[0], mode, "BUY", mint, symbol, size_sol, tokens, base_usd, "ok"),
+            (int(time.time()), conn.execute("SELECT last_insert_rowid()").fetchone()[0], mode, "BUY", mint, symbol, size_sol, tokens, 0.0, "ok"),
         )
         conn.commit()
         conn.close()
-        logger.info("{} open {} {} @ ${:.6g} size {} SOL", mode, mint[:8], symbol, base_usd, size_sol)
-        mcap_sol = base_usd / sol_usd * 1e9 if sol_usd > 0 else 0
-        _notify(f"🟢 {mode} OPEN {symbol} @{base_usd:.3e} • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}")
+        logger.info("{} open {} {} @ {:.6g} SOL/tok size {} SOL", mode, mint[:8], symbol, base_sol, size_sol)
+        mcap_sol = base_sol * 1e9
+        _notify(f"🟢 {mode} OPEN {symbol} @{base_sol:.3e} SOL/tok • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}")
         return True
     except Exception as e:
         logger.warning("open_paper_position fail {}: {}", mint[:8], e)
         return False
 
 
-async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
+async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float = 0.0):
     """Tiered scale-out (+40/60/80) with a ratcheting trailing stop. Each TP tier
     locks profit (sells 1/3); once in profit the stop ratchets up so we never give
     a winner back. Hard SL only applies before the first tier is hit.
@@ -574,7 +597,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
         pos = conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
         if not pos or pos["status"] != "open":
             conn.close(); return
-        entry = pos["entry_price_usd"] or price
+        entry = _entry_sol(pos)
         if entry <= 0:
             conn.close(); return
         mode = pos["mode"]
@@ -582,11 +605,10 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
         size_sol = pos["size_sol"]
         tp_tier = int(pos["tp_tier"] or 0)
         realized = float(pos["realized_sol"] or 0.0)
-        peak = max(pos["peak_price_usd"] or entry, price)
-        if price > (pos["peak_price_usd"] or 0):
-            conn.execute("UPDATE positions SET peak_price_usd=? WHERE id=?", (price, pos_id))
-            conn.commit()  # peak MUST persist even when no exit branch fires —
-                           # otherwise the trail rebases downward on hot tokens
+        peak = max(_peak_sol(pos, entry), price)
+        if price > _peak_sol(pos, entry):
+            conn.execute("UPDATE positions SET peak_price_sol=? WHERE id=?", (price, pos_id))
+            conn.commit()
         change_pct = (price / entry - 1) * 100
         # live executor setup (None in paper mode)
         from hunt.exec.live import get_live_executor
@@ -602,7 +624,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
                      remaining balance when units == 0); proceeds = actual fill.
             (None, 0) => LIVE sale failed — caller must keep the position open."""
             if ex is None:
-                return (units * price / sol_usd) if sol_usd > 0 else 0.0, units
+                return units * price, units
             raw_bal = await ex._token_balance_raw(mint)
             if raw_bal <= 0:
                 return 0.0, 0.0
@@ -651,7 +673,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
             tokens -= units_sold
             sold_frac += frac
             tp_tier += 1
-            conn.execute("UPDATE positions SET tokens=?, tp_tier=?, realized_sol=?, peak_price_usd=? WHERE id=?",
+            conn.execute("UPDATE positions SET tokens=?, tp_tier=?, realized_sol=?, peak_price_sol=? WHERE id=?",
                          (tokens, tp_tier, realized, peak, pos_id))
             conn.commit()
             logger.info("{} tp{} {} +{:.0f}% slice {:+.4f} SOL [ws]", mode, mint[:8], tp_tier, TIER_TRIGGERS[tp_tier - 1] * 100, slice_pnl)
@@ -707,12 +729,12 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float):
         logger.debug("process exit error {}", e)
 
 
-async def _handle_price_update(mint: str, price_usd: float, sol_usd: float):
-    if price_usd <= 0 or not mint: return
-    if price_usd < 1e-9 or price_usd > 10:  # sanity filter broken parses
+async def _handle_price_update(mint: str, price_sol: float, sol_usd: float = 0.0):
+    if price_sol <= 0 or not mint: return
+    if price_sol > 10:
         return
     _last_ws_ts[mint] = time.time()
-    _ws_price[mint] = price_usd
+    _ws_price[mint] = price_sol
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -720,7 +742,7 @@ async def _handle_price_update(mint: str, price_usd: float, sol_usd: float):
         conn.close()
         if not pos:
             return
-        await _process_exit(pos["id"], mint, price_usd, sol_usd)
+        await _process_exit(pos["id"], mint, price_sol)
     except Exception as e:
         logger.debug("ws handle error {}", e)
 
@@ -734,7 +756,7 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
         pos = conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
         if not pos or pos["status"] != "open":
             conn.close(); return
-        entry = pos["entry_price_usd"] or price
+        entry = _entry_sol(pos)
         mode = pos["mode"]
         tokens = pos["tokens"]
         size_sol = pos["size_sol"]
@@ -756,7 +778,7 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
                     return
                 proceeds = r.sol_lamports / 1e9
         else:
-            proceeds = tokens * price / sol_usd if sol_usd > 0 else 0.0
+            proceeds = tokens * price
         cost_rem = size_sol * ((2.0 / 3.0) ** tp_tier)
         realized += proceeds - cost_rem
         conn.execute("UPDATE positions SET status='closed', closed_ts=?, exit_reason=?, exit_sol=?, pnl_sol=? WHERE id=?",
@@ -769,10 +791,9 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
 
 
 async def price_ws_loop(stop_event: asyncio.Event):
-    """Real-time bonding-curve pricing (Helius accountSubscribe) + SOL/USD refresher.
-    Replaces the dead stream.pumpapi.io websocket that never delivered a tick."""
+    """Helius accountSubscribe — SOL ticks. No FX poll."""
     global FEED
-    FEED = PriceFeed(on_tick=lambda mint, q: _handle_price_update(mint, q.price_usd, _sol_usd()))
+    FEED = PriceFeed(on_tick=lambda mint, q: _handle_price_update(mint, q.price_sol))
     await FEED.run(stop_event)
 
 
@@ -857,7 +878,13 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                     closed_n = 0
                     for pos in list(positions):
                         if pos["mode"] == "LIVE":
-                            await _force_close(pos["id"], pos["mint"], pos["peak_price_usd"] or pos["entry_price_usd"], _sol_usd(), "kill")
+                            cur = 0.0
+                            if FEED is not None:
+                                q = FEED.stale_quote(pos["mint"], 600.0)
+                                cur = q.price_sol if q else 0.0
+                            if cur <= 0:
+                                cur = _entry_sol(pos)
+                            await _force_close(pos["id"], pos["mint"], cur, 0.0, "kill")
                             closed_n += 1
                     positions = [p for p in positions if p["mode"] != "LIVE"]
                     try:
@@ -883,7 +910,13 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                         _notify(f"🛑 LIVE DAILY LOSS CAP — {lost:+.3f} SOL today. Force-closing ALL live positions.")
                         for pos in list(positions):
                             if pos["mode"] == "LIVE":
-                                await _force_close(pos["id"], pos["mint"], pos["peak_price_usd"] or pos["entry_price_usd"], _sol_usd(), "daily_loss_cap")
+                                cur = 0.0
+                                if FEED is not None:
+                                    q = FEED.stale_quote(pos["mint"], 600.0)
+                                    cur = q.price_sol if q else 0.0
+                                if cur <= 0:
+                                    cur = _entry_sol(pos)
+                                await _force_close(pos["id"], pos["mint"], cur, 0.0, "daily_loss_cap")
                         positions = [p for p in positions if p["mode"] != "LIVE"]
             except Exception as e:
                 # NEVER debug-logged: a broken loss-cap guard must scream. (The
@@ -901,38 +934,35 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                         await FEED.unsubscribe(m)
             # HTTP poll only if Helius still hasn't ticked this mint
             uncovered = [p for p in positions if now - _last_ws_ts.get(p["mint"], 0) > _poll_s]
-            from hunt.exec.live import get_live_executor as _gle
-            _ex = _gle()
-            _sol = _sol_usd()
             _blind_s = float(get_settings().live_blind_alert_s or 120)
             for pos in uncovered:
-                live_pos = pos["mode"] == "LIVE"
-                price, source = await _live_exit_price(client, ds_exits, pos["mint"], live_pos,
-                                                       _ex if live_pos else None, _sol)
-                if live_pos:
+                price = 0.0
+                if FEED is not None:
+                    q = FEED.quote(pos["mint"], 30.0) or FEED.stale_quote(pos["mint"], 300.0)
+                    if q:
+                        price = q.price_sol
+                if pos["mode"] == "LIVE":
                     if price > 0:
-                        _px_seen[pos["mint"]] = (now, source)
+                        _px_seen[pos["mint"]] = (now, "helius")
                     else:
                         last, _src = _px_seen.get(pos["mint"], (0.0, ""))
                         if now - last > _blind_s and now - _blind_warned.get(pos["mint"], 0.0) > 600.0:
                             _blind_warned[pos["mint"]] = now
-                            _notify(f"👁 BLIND {pos['symbol'] or pos['mint'][:8]} — no exit price for {now-last:.0f}s (curve/gecko/dex/jup all dark)")
+                            _notify(f"👁 BLIND {pos['symbol'] or pos['mint'][:8]} — no Helius tick for {now-last:.0f}s")
                             logger.warning("LIVE position blind {} for {:.0f}s", pos["mint"][:8], now - last)
-                if price <= 0: continue
-                if price > (pos["peak_price_usd"] or 0):
-                    conn = sqlite3.connect(DB_PATH)
-                    conn.execute("UPDATE positions SET peak_price_usd=? WHERE id=?", (price, pos["id"]))
-                    conn.commit(); conn.close()
-                # tiered exit handles SL/TP/trailing internally
-                await _process_exit(pos["id"], pos["mint"], price, _sol_usd())
-            # max_hold: 6h for normal positions; 24h for moon bags (tp_tier>=2
-            # means cost basis is banked — house money rides, the trail protects it)
+                if price <= 0:
+                    continue
+                await _process_exit(pos["id"], pos["mint"], price)
             for pos in positions:
                 hold_cap = 24*3600 if int(pos["tp_tier"] or 0) >= 2 else 6*3600
                 if now - pos["opened_ts"] > hold_cap:
-                    price = await _price_for_mint_fallback(client, pos["mint"])
-                    if price <= 0: price = pos["peak_price_usd"] or pos["entry_price_usd"]
-                    await _force_close(pos["id"], pos["mint"], price, _sol_usd(), "max_hold")
+                    price = 0.0
+                    if FEED is not None:
+                        q = FEED.stale_quote(pos["mint"], 600.0)
+                        price = q.price_sol if q else 0.0
+                    if price <= 0:
+                        price = _entry_sol(pos)
+                    await _force_close(pos["id"], pos["mint"], price, 0.0, "max_hold")
         except Exception as e:
             logger.debug("paper stops poll error {}", e)
         try:
