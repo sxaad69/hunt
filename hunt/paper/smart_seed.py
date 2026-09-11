@@ -93,7 +93,7 @@ async def seed_once() -> None:
         logger.info("smart-seed mints={} edges+={} promoted={} tracked={}",
                     len(mints), added, promoted, tracked_count())
     except Exception as e:
-        logger.warning("smart-seed failed: {}", e)
+        logger.info("smart-seed idle — {} (tracked={})", e, tracked_count())
 
 
 async def smart_seed_loop(stop_event: asyncio.Event, interval_s: float = 900.0) -> None:

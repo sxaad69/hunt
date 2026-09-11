@@ -46,7 +46,16 @@ def tier_for_pnl(pnl: float) -> Tier:
 
 def get_tier() -> Tier:
     pnl = current_pnl_sol()
-    return tier_for_pnl(pnl)
+    t = tier_for_pnl(pnl)
+    # paper: DEAD (max_open=0) is a live-wallet "need funds" state.
+    # Lifetime paper SLs must not freeze the soak — run as critical instead.
+    try:
+        from hunt.config import get_settings
+        if t.name == "dead" and get_settings().dry_run:
+            return TIERS["critical"]
+    except Exception:
+        pass
+    return t
 
 def heartbeat_once() -> dict:
     tier = get_tier()
