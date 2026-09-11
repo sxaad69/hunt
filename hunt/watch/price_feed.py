@@ -130,6 +130,9 @@ class PriceFeed:
         """WS-first mark: curve subscribe, promote to PumpSwap vaults if graduated."""
         await self.subscribe(mint)
         q = self._quotes.get(mint)
+        if (not q or q.price_sol <= 0) and mint in self._mints:
+            await self._seed_quote(mint, self._mints[mint])
+            q = self._quotes.get(mint)
         if q and q.graduated:
             await self._promote_amm(mint, pool_address)
             q = self._quotes.get(mint)

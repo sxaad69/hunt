@@ -498,6 +498,11 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
                 q = None
             if q and q.price_sol > 0:
                 price_sol = q.price_sol
+            if price_sol <= 0:
+                await asyncio.sleep(0.6)
+                q2 = FEED.stale_quote(mint, 30.0) or FEED.quote(mint, 30.0)
+                if q2 and q2.price_sol > 0:
+                    price_sol = q2.price_sol
         if price_sol <= 0:
             _notify(f"⚠️ NO ENTRY PRICE {symbol} {mint[:8]} — gated ACCEPT but Helius blind, skipped")
             logger.info("no entry price for {} {} — skipping accepted candidate", mint[:8], symbol)
