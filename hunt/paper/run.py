@@ -519,17 +519,20 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         cur = conn.execute("SELECT 1 FROM positions WHERE mint=? AND mode=? AND status='open' LIMIT 1", (mint, mode))
         if cur.fetchone():
             conn.close()
+            logger.info("already open {} {}", mint[:8], symbol)
             return False
-        # survival tiered max_open
         from hunt.survival.tiers import get_tier
         tier = get_tier()
         max_open = tier.max_open
         if max_open == 0:
             conn.close()
+            logger.info("max_open=0 skip {} {}", mint[:8], symbol)
             return False
         cur = conn.execute("SELECT COUNT(*) FROM positions WHERE mode=? AND status='open'", (mode,))
-        if (cur.fetchone()[0] or 0) >= max_open:
+        nopen = cur.fetchone()[0] or 0
+        if nopen >= max_open:
             conn.close()
+            logger.info("at cap {}/{} skip {} {}", nopen, max_open, mint[:8], symbol)
             return False
         size_sol = tier.trade_size_sol
         if ex is not None:

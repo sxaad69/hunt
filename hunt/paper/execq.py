@@ -36,16 +36,21 @@ def offer_tick(mint: str, price_sol: float) -> None:
 
 
 def offer_open(mint: str, symbol: str, ds) -> None:
-    if not mint or _open_q is None:
+    if not mint:
+        return
+    if _open_q is None:
+        logger.warning("open queue not init — dropped {}", mint[:8])
         return
     try:
         _open_q.put_nowait((mint, symbol, ds))
+        logger.info("open queued {} {}", mint[:8], symbol)
     except asyncio.QueueFull:
         logger.warning("open queue full — dropped {}", mint[:8])
 
 
 async def tick_workers(stop_event: asyncio.Event, n: int = 4) -> None:
     from hunt.paper.run import _handle_price_update
+    logger.info("tick_workers n={}", n)
 
     async def worker():
         while not stop_event.is_set():
@@ -72,8 +77,12 @@ async def tick_workers(stop_event: asyncio.Event, n: int = 4) -> None:
 
 
 async def open_worker(stop_event: asyncio.Event, stats: dict) -> None:
-    from hunt.paper.run import open_paper_position
-
+    try:
+        from hunt.paper.run import open_paper_position
+    except Exception as e:
+        logger.error("open_worker cannot import open_paper_position: {}", e)
+        return
+    logger.info("open_worker live")
     while not stop_event.is_set():
         try:
             mint, symbol, ds = await asyncio.wait_for(_open_q.get(), timeout=0.5)
