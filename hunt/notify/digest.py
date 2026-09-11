@@ -49,14 +49,18 @@ def build_digest() -> str:
         L.append(f"top runner: {top['symbol']} {top['pnl']:+.4f} SOL (entry {top['mc']:.0f} SOL)")
 
     # intel fingerprints: winners vs losers at decision time
-    w = conn.execute("""SELECT AVG(pd.top10) t, AVG(pd.holders) h, AVG(pd.snipers) s, COUNT(*) c
+    w = conn.execute("""SELECT AVG(pd.top10) t, AVG(pd.holders) h,
+                               AVG(json_extract(pd.tracker_json,'$.snipers.totalPercentage')) s, COUNT(*) c
                         FROM paper_decisions pd JOIN positions po ON po.mint=pd.mint
                         WHERE pd.decided_at>=? AND po.pnl_sol>0 AND pd.top10 IS NOT NULL""", (cutoff,)).fetchone()
-    l = conn.execute("""SELECT AVG(pd.top10) t, AVG(pd.holders) h, AVG(pd.snipers) s, COUNT(*) c
+    l = conn.execute("""SELECT AVG(pd.top10) t, AVG(pd.holders) h,
+                               AVG(json_extract(pd.tracker_json,'$.snipers.totalPercentage')) s, COUNT(*) c
                         FROM paper_decisions pd JOIN positions po ON po.mint=pd.mint
                         WHERE pd.decided_at>=? AND po.pnl_sol<=0 AND pd.top10 IS NOT NULL""", (cutoff,)).fetchone()
     if w["c"] and l["c"]:
-        L.append(f"intel: winners(n={w['c']}) top10={w['t']:.0f}% holders={w['h']:.0f} snip={w['s']:.1f} | losers(n={l['c']}) top10={l['t']:.0f}% holders={l['h']:.0f} snip={l['s']:.1f}")
+        ws = f"{w['s']:.1f}" if w["s"] is not None else "?"
+        ls = f"{l['s']:.1f}" if l["s"] is not None else "?"
+        L.append(f"intel: winners(n={w['c']}) top10={w['t']:.0f}% holders={w['h']:.0f} snip%={ws} | losers(n={l['c']}) top10={l['t']:.0f}% holders={l['h']:.0f} snip%={ls}")
     else:
         b = conn.execute("SELECT COUNT(*) c FROM paper_decisions WHERE top10 IS NOT NULL AND decided_at>=?", (cutoff,)).fetchone()["c"]
         L.append(f"intel: {b} fingerprints collected (win/loss split needs more samples)")

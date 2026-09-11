@@ -138,6 +138,7 @@ def test_quote_valid_without_usd():
 def test_snipers_pct_not_count():
     assert verdict_from_risk(None) == (False, "snipers_unavailable")
     assert verdict_from_risk({"score": 10}) == (False, "snipers_unavailable")
+    assert verdict_from_risk({"score": 10, "snipers": {"count": 61}}) == (False, "snipers_unavailable")
     ok, reason = verdict_from_risk({"score": 10, "snipers": {"count": 61, "totalPercentage": 7.7}})
     assert ok and reason == "risk_10"
     ok, reason = verdict_from_risk({"score": 2, "snipers": {"count": 3, "totalPercentage": 25.0}})
@@ -182,3 +183,16 @@ def test_protocol_accounts_are_base58():
     accs = protocol_token_accounts(mint)
     assert len(accs) == 2
     assert all(len(a) >= 32 for a in accs)
+
+
+def test_snipers_zero_pct_is_pass():
+    ok, reason = verdict_from_risk({"score": 3, "snipers": {"totalPercentage": 0.0}})
+    assert ok and reason == "risk_3"
+
+
+def test_execq_tick_does_not_await():
+    from hunt.paper import execq
+    execq._tick_q = None
+    execq.init()
+    execq.offer_tick("Mint111", 1.2e-8)
+    assert execq._tick_q.qsize() >= 1

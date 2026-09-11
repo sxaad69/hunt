@@ -75,7 +75,8 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 
 ## Strategy (current, frozen until evidence says otherwise)
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
-- **Gates**: dust floor ≥50 SOL · ceiling RE-ENABLED 2026-09-11 ≤3000 SOL species-A only (operator order for supervised live; was disabled 09-08 chasing B tails) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
+- **Gates**: dust floor ≥50 SOL · ceiling ≤3000 SOL species-A only (graduated B: no ceiling in code) · circulating top10>75% · Tracker snipers.totalPercentage>20 fail-closed · socials + survival model · serial_rugger (SQL fixed) · smart-wallet Plan B (GMGN seed) · WS/exec split Plan C (recv never awaits sell)
+- **tracker_json**: paper_decisions stores Tracker `risk` object when Tracker was called.
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after.
   Ladder is **SOL-native** (`price_sol` / `entry_price_sol` / `peak_price_sol`). No 45s SOL/USD poll.

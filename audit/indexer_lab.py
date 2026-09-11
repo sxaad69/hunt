@@ -85,7 +85,7 @@ async def one(client: httpx.AsyncClient, coin: dict, rpc: str) -> dict:
     sym = (coin.get("symbol") or "?")[:12]
     http_st, d = await indexer(client, mint)
     chain = await fetch_onchain_top10(client, rpc, mint)
-    ok_risk, tr = await check_risk(mint, client)
+    ok_risk, tr, _risk = await check_risk(mint, client)
     idx_top = None
     if http_st == 200:
         try:

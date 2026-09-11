@@ -472,7 +472,9 @@ class PriceFeed:
         q = self._quotes.get(mint)
         if q is not None and self.on_tick is not None:
             try:
-                await self.on_tick(mint, q)
+                maybe = self.on_tick(mint, q)
+                if asyncio.iscoroutine(maybe):
+                    asyncio.create_task(maybe)
             except Exception as e:
                 logger.debug("[price-feed] on_tick error: {}", e)
 

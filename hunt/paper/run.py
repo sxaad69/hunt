@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS {PAPER_DB_TABLE} (
     top10 REAL,
     snipers INTEGER,
     holders INTEGER,
-    dev_pct REAL
+    dev_pct REAL,
+    tracker_json TEXT
 );
 """
 
@@ -395,7 +396,7 @@ def ensure_db():
             conn.execute("UPDATE positions SET entry_price_sol=?, peak_price_sol=? WHERE id=?",
                          (entry_sol, peak_sol, pid))
     # learning-loop columns (dev reputation + burst shape + holder intel)
-    for col in ("dev TEXT", "burst TEXT", "top10 REAL", "snipers INTEGER", "holders INTEGER", "dev_pct REAL"):
+    for col in ("dev TEXT", "burst TEXT", "top10 REAL", "snipers INTEGER", "holders INTEGER", "dev_pct REAL", "tracker_json TEXT"):
         try:
             conn.execute(f"ALTER TABLE {PAPER_DB_TABLE} ADD COLUMN {col}")
         except Exception:
@@ -554,31 +555,27 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             decimals = r.decimals
             _LIVE_DECIMALS[mint] = r.decimals
             base_sol = size_sol / tokens if tokens > 0 else price_sol
-            # PAYUP GUARD: a fill far over pool is born below its own stop
-            # (eL5f paid +38% on a $3k pool). Reverse it, don't record it.
-            if ds is not None:
-                try:
-                    pool_px, _pl = await ds.price_for_mint(mint)
-                except Exception:
-                    pool_px = 0.0
-                if pool_px > 0:
-                    from hunt.config import get_settings as _gs5
-                    fx = await _fx_usd_for_notify()
-                    fill_usd = base_sol * fx if fx > 0 else 0.0
-                    over = (fill_usd / pool_px - 1) if (pool_px > 0 and fill_usd > 0) else 0.0
-                    if fill_usd > 0 and over > float(_gs5().live_entry_payup_guard_pct or 15) / 100:
-                        logger.warning("payup guard reversing {} fill ${:.3e} {:.0f}% over pool ${:.3e}",
-                                       mint[:8], fill_usd, over * 100, pool_px)
-                        _notify(f"🛟 PAYUP GUARD {symbol}: fill {over*100:.0f}% over pool — reversing, no position")
-                        rb = await ex.sell(mint, int(r.tokens_raw))
-                        if rb and rb.ok:
-                            conn.close()
-                            _notify(f"🛟 PAYUP reversed {symbol}: got {rb.sol_lamports/1e9:.4f} SOL")
-                            return False
-                        logger.error("payup reverse failed — recording managed position {}", mint[:8])
-                        _notify(f"🛟 PAYUP GUARD {symbol}: reverse FAILED, position recorded (SL manages it)")
-                else:
-                    logger.info("payup guard skipped (no pool price) {}", mint[:8])
+            # PAYUP: fill price_sol vs Helius pool tick. No FX / Dex USD.
+            pool_sol = 0.0
+            if FEED is not None:
+                qpay = FEED.stale_quote(mint, 60.0)
+                pool_sol = qpay.price_sol if qpay else 0.0
+            if pool_sol > 0 and base_sol > 0:
+                from hunt.config import get_settings as _gs5
+                over = base_sol / pool_sol - 1.0
+                if over > float(_gs5().live_entry_payup_guard_pct or 15) / 100:
+                    logger.warning("payup guard reversing {} fill {:.3e} {:.0f}% over helius {:.3e}",
+                                   mint[:8], base_sol, over * 100, pool_sol)
+                    _notify(f"🛟 PAYUP GUARD {symbol}: fill {over*100:.0f}% over Helius — reversing, no position")
+                    rb = await ex.sell(mint, int(r.tokens_raw))
+                    if rb and rb.ok:
+                        conn.close()
+                        _notify(f"🛟 PAYUP reversed {symbol}: got {rb.sol_lamports/1e9:.4f} SOL")
+                        return False
+                    logger.error("payup reverse failed — recording managed position {}", mint[:8])
+                    _notify(f"🛟 PAYUP GUARD {symbol}: reverse FAILED, position recorded (SL manages it)")
+            else:
+                logger.info("payup guard skipped (no Helius tick) {}", mint[:8])
             logger.info("LIVE open {} {} @{} SOL/tok size {} SOL venue={} sig={}", mint[:8], symbol, base_sol, size_sol, r.venue, r.signature)
         else:
             decimals = 6
@@ -586,7 +583,7 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
             base_sol = price_sol
         conn.execute(
             "INSERT INTO positions(opened_ts,mint,symbol,mode,size_sol,tokens,entry_price_usd,tp_pct,sl_pct,trail_pct,peak_price_usd,tp_tier,realized_sol,decimals,entry_price_sol,peak_price_sol) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (int(time.time()), mint, symbol, mode, size_sol, tokens, 0.0, 100.0, -30.0, 20.0, 0.0, 0, 0.0, decimals, base_sol, base_sol),
+            (int(time.time()), mint, symbol, mode, size_sol, tokens, 0.0, 100.0, SL_PCT, 20.0, 0.0, 0, 0.0, decimals, base_sol, base_sol),
         )
         conn.execute(
             "INSERT INTO trades(ts,position_id,mode,side,mint,symbol,amount_sol,token_amount,price_usd,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -595,8 +592,13 @@ async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = N
         conn.commit()
         conn.close()
         logger.info("{} open {} {} @ {:.6g} SOL/tok size {} SOL", mode, mint[:8], symbol, base_sol, size_sol)
-        mcap_sol = base_sol * 1e9
-        _notify(f"🟢 {mode} OPEN {symbol} @{base_sol:.3e} SOL/tok • {size_sol} SOL • mcap ~{mcap_sol:.0f} SOL • {mint[:6]}", sol=size_sol)
+        mcap_sol = 0.0
+        if FEED is not None:
+            qm = FEED.stale_quote(mint, 600.0)
+            if qm and qm.mcap_sol > 0:
+                mcap_sol = qm.mcap_sol
+        mcap_bit = f" • mcap ~{mcap_sol:.0f} SOL" if mcap_sol > 0 else ""
+        _notify(f"🟢 {mode} OPEN {symbol} @{base_sol:.3e} SOL/tok • {size_sol} SOL{mcap_bit} • {mint[:6]}", sol=size_sol)
         return True
     except Exception as e:
         logger.warning("open_paper_position fail {}: {}", mint[:8], e)
@@ -612,7 +614,7 @@ async def _process_exit(pos_id: int, mint: str, price: float, sol_usd: float = 0
     actual fill (parsed from the confirmed tx). If a live sell fails the position
     is KEPT open (never phantom-closed)."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         pos = conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
         if not pos or pos["status"] != "open":
@@ -756,7 +758,7 @@ async def _handle_price_update(mint: str, price_sol: float, sol_usd: float = 0.0
     _last_ws_ts[mint] = time.time()
     _ws_price[mint] = price_sol
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         pos = conn.execute("SELECT id FROM positions WHERE mint=? AND mode IN ('PAPER','LIVE') AND status='open' LIMIT 1", (mint,)).fetchone()
         conn.close()
@@ -813,7 +815,8 @@ async def _force_close(pos_id: int, mint: str, price: float, sol_usd: float, rea
 async def price_ws_loop(stop_event: asyncio.Event):
     """Helius accountSubscribe — SOL ticks. No FX poll."""
     global FEED
-    FEED = PriceFeed(on_tick=lambda mint, q: _handle_price_update(mint, q.price_sol))
+    from hunt.paper.execq import offer_tick
+    FEED = PriceFeed(on_tick=lambda mint, q: offer_tick(mint, q.price_sol))
     await FEED.run(stop_event)
 
 
@@ -1066,18 +1069,21 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
     # vetoed; a creator with a proven runner gets annotated for the digest
     if dev and accept:
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             prior = conn.execute(
-                """SELECT COUNT(DISTINCT pd.mint) n,
-                          SUM(CASE WHEN po.pnl_sol > 0.5 THEN 1 ELSE 0 END) runners,
-                          SUM(CASE WHEN po.exit_reason='stop_loss' AND (po.closed_ts-po.opened_ts) < 900 THEN 1 ELSE 0 END) fast_rugs
+                """SELECT COUNT(DISTINCT pd.mint),
+                          SUM(CASE WHEN po.pnl_sol > 0.5 THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN po.exit_reason='stop_loss' AND (po.closed_ts-po.opened_ts) < 900 THEN 1 ELSE 0 END)
                    FROM paper_decisions pd
                    JOIN positions po ON po.mint=pd.mint AND po.mode='PAPER' AND po.status='closed'
                    WHERE pd.dev=? AND pd.mint != ?""", (dev, mint)).fetchone()
             conn.close()
-            if prior and (prior["n"] or 0) >= 2 and (prior["runners"] or 0) == 0 and (prior["fast_rugs"] or 0) >= 2:
-                accept, reason = False, f"serial_rugger_{prior['fast_rugs']}"
-            elif prior and (prior["runners"] or 0) >= 1:
+            n = int(prior[0] or 0) if prior else 0
+            runners = int(prior[1] or 0) if prior else 0
+            fast_rugs = int(prior[2] or 0) if prior else 0
+            if n >= 2 and runners == 0 and fast_rugs >= 2:
+                accept, reason = False, f"serial_rugger_{fast_rugs}"
+            elif runners >= 1:
                 reason = f"{reason}+dev_winner"
         except Exception:
             pass
@@ -1101,10 +1107,11 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
     except: pass
     # SolanaTracker risk gate (zostaff style: risk>7 veto, top10≥80%, dev≥25%)
     tracker_reason = ""
+    tracker_risk = None
     if accept:
         try:
             from hunt.utils.solanatracker import check_risk
-            ok_risk, tracker_reason = await check_risk(mint, client)
+            ok_risk, tracker_reason, tracker_risk = await check_risk(mint, client)
             if not ok_risk:
                 accept = False
                 reason = tracker_reason
@@ -1114,14 +1121,15 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
             accept = False
             reason = "snipers_unavailable"
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute(SCHEMA)
+    tj = json.dumps(tracker_risk) if tracker_risk else None
     conn.execute(
-        f"INSERT OR IGNORE INTO {PAPER_DB_TABLE} (mint,symbol,created_ts,decision,reason,twitter,telegram,website,market_cap,decided_at,dev,burst,top10,snipers,holders,dev_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        f"INSERT OR IGNORE INTO {PAPER_DB_TABLE} (mint,symbol,created_ts,decision,reason,twitter,telegram,website,market_cap,decided_at,dev,burst,top10,snipers,holders,dev_pct,tracker_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (mint, symbol, created_ts, "ACCEPT" if accept else "REJECT", reason,
          coin.get("twitter"), coin.get("telegram"), coin.get("website"),
          float(coin.get("market_cap") or 0), now, dev, coin.get("_burst"),
-         coin.get("_top10"), coin.get("_snipers"), coin.get("_holders"), coin.get("_dev_pct")),
+         coin.get("_top10"), None, coin.get("_holders"), coin.get("_dev_pct"), tj),
     )
     conn.commit()
     conn.close()
@@ -1130,10 +1138,10 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
         stats["accepted"] += 1
         logger.info("ACCEPT {} {} ({}) [{}]", mint[:8], symbol, reason, tracker_reason)
         try:
-            ok = await open_paper_position(mint, symbol, ds)
-            if ok: stats["opened"] += 1
+            from hunt.paper.execq import offer_open
+            offer_open(mint, symbol, ds)
         except Exception as e:
-            logger.debug("open position failed {}: {}", mint[:8], e)
+            logger.debug("open enqueue failed {}: {}", mint[:8], e)
     else:
         stats["rejected"] += 1
         # append to both a.txt files
@@ -1232,8 +1240,14 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
 
     # start pricing/exit engine + heartbeat + discovery stream
     from hunt.heartbeat.monitor import heartbeat_loop
+    from hunt.paper.execq import init as execq_init, open_worker, tick_workers
+    from hunt.paper.smart_seed import smart_seed_loop
     from hunt.watch.discovery_ws import new_tokens_loop
+    execq_init()
     stop_evt = asyncio.Event()
+    tick_task = asyncio.create_task(tick_workers(stop_evt, 4))
+    open_task = asyncio.create_task(open_worker(stop_evt, stats))
+    smart_task = asyncio.create_task(smart_seed_loop(stop_evt))
     stops_task = asyncio.create_task(paper_stops_loop(stop_evt))
     hb_task = asyncio.create_task(heartbeat_loop(stop_evt, 60))
     disc_task = asyncio.create_task(new_tokens_loop(stop_evt, on_new_token))
@@ -1335,7 +1349,7 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
                 await asyncio.sleep(min(300, max(0, end - time.time())))
 
     stop_evt.set()
-    for t in (hb_task, disc_task, stops_task, ctrl_task):
+    for t in (hb_task, disc_task, stops_task, ctrl_task, tick_task, open_task, smart_task):
         try: t.cancel()
         except: pass
     try:

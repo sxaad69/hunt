@@ -16,10 +16,11 @@ def verdict_from_risk(risk: dict | None) -> tuple[bool, str]:
         return False, "snipers_unavailable"
     if risk.get("rugged"):
         return False, "rugged"
-    if "snipers" not in risk or not isinstance(risk.get("snipers"), dict):
+    sn = risk.get("snipers")
+    if not isinstance(sn, dict) or "totalPercentage" not in sn:
         return False, "snipers_unavailable"
     try:
-        pct = float(risk["snipers"].get("totalPercentage") or 0)
+        pct = float(sn["totalPercentage"])
     except (TypeError, ValueError):
         return False, "snipers_unavailable"
     if pct > 20:
@@ -31,12 +32,12 @@ def verdict_from_risk(risk: dict | None) -> tuple[bool, str]:
     return True, f"risk_{score}"
 
 
-async def check_risk(mint: str, client: httpx.AsyncClient | None = None) -> tuple[bool, str]:
-    """Snipers fail-closed. Down/missing tracker → snipers_unavailable. Score is annotation."""
+async def check_risk(mint: str, client: httpx.AsyncClient | None = None) -> tuple[bool, str, dict | None]:
+    """Snipers fail-closed. Returns (ok, reason, risk_dict_or_None)."""
     s = get_settings()
     key = s.solanatracker_api_key
     if not key:
-        return False, "snipers_unavailable"
+        return False, "snipers_unavailable", None
     close_client = False
     if client is None:
         client = httpx.AsyncClient(timeout=10)
@@ -50,11 +51,13 @@ async def check_risk(mint: str, client: httpx.AsyncClient | None = None) -> tupl
         )
         if r.status_code != 200:
             logger.debug("tracker {} status {}", mint[:8], r.status_code)
-            return False, "snipers_unavailable"
-        return verdict_from_risk((r.json() or {}).get("risk"))
+            return False, "snipers_unavailable", None
+        risk = (r.json() or {}).get("risk")
+        ok, reason = verdict_from_risk(risk)
+        return ok, reason, risk if isinstance(risk, dict) else None
     except Exception as e:
         logger.debug("tracker check fail {}: {}", mint[:8], e)
-        return False, "snipers_unavailable"
+        return False, "snipers_unavailable", None
     finally:
         if close_client:
             await client.aclose()
