@@ -85,7 +85,7 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 
 ## Strategy (current, frozen until evidence says otherwise)
 - **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
-- **Gates**: dust floor ≥50 SOL · ceiling DISABLED 2026-09-08 (was ≤3000) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
+- **Gates**: dust floor ≥50 SOL · ceiling RE-ENABLED 2026-09-11 ≤3000 SOL species-A only (operator order for supervised live; was disabled 09-08 chasing B tails) · top10>75% veto · snipers≥2 veto · socials + survival model · SolanaTracker risk · dev reputation (serial_rugger veto)
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius curve ticks (exact, ~0–2% vs pump.fun indexer); GeckoTerminal fallback for graduated tokens
 - **Species-B REOPENED 2026-09-08 (decision)**: ceiling gate commented (`run.py`)
@@ -118,6 +118,30 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - `base_decimals` varies (6 classic; stonkfun uses 9) — verify before price math on unknown programs.
 - Safety-net poll must run on its own clock — it starved once during launch bursts and missed launches.
 - Jupiter does NOT route bonding curves — curve entries need the pump program (deferred build).
+- **`advanced-indexer.pump.fun/in-memory-coin` intel is UNRELIABLE (2026-09-11)**: returned
+  clean `top10=0 / snipers=0 / dev_pct=0` for all 6 species-A ACCEPTs in the first live window
+  (Rufus/Karen/RKC/GROK/CRISPE/TEDDY), but on-chain ground truth (`getTokenLargestAccounts`) shows
+  98–100% top-10 supply and 53–100% dev-held for every one of them — all six are now dead dump-factories.
+  The SAME gates correctly vetoed `top10_heavy` 83× and `sniper_bundle` 73× on other coins, so the
+  endpoint is intermittently wrong, not uniformly broken. The `top10>75 / snipers>=2` vetoes (run.py
+  105-108) trust ONLY this indexer — no on-chain fallback. Does NOT consult on-chain distribution.
+  VERDICT: entry quality cannot be trusted from this source alone; ground-truth top-10% via
+  `getTokenLargestAccounts` before ANY live open (a "false-clean ACCEPT" became the Rufus phantom-close
+  wallet drain; live remains OPERATOR-PAUSED pending a gate fix).
+- **Live sell must NEVER convert coins into an untracked quote mint mid-path** (2026-09-11, Rufus):
+  the coin→quote→SOL chained sell left proceeds parked in the quote token when leg2 reverted
+  (`Custom 6024`), then the engine's `raw_bal==0` shortcut closed the position at a fabricated full
+  stop-loss while the value was still in the wallet. FIXED: `_sell_amm` now sells directly coin→WSOL
+  in adaptive slices, verifying each slice's real SOL inflow before reporting; `sell_now` also refuses
+  to close a position whose whole-balance exit left coins behind (partial slice). Keep the invariant:
+  a LIVE position closes ONLY when verified SOL arrived and the coin bag is truly flat.
+- **Jupiter (the AMM router) DOES route un-graduated bonding curves now (2026-09-11)** — the old
+  "curve needs the pump program" rule is stale for NEW quotes: SOL→coin quotes exist for every
+  quote-mint family (WSOL/USDC/exotic) and the router emits the 26-account quote-aware pump CPI
+  (buy disc `5df6823ce7e940b2`, 24-byte data). BUT full-bag coin→SOL sell routes often FAIL at the
+  same sizes that buy routes pass — sell sizes must be sliced until the route fits the 1232-byte
+  wire cap with all ATAs pre-created. Update the "Jupiter does NOT route curves" bullet above → it
+  routes them, the platform just caps tx size.
 
 ## Audit tooling (`audit/`)
 - `top_runners.py [hours]` — ranks today's ≥10x runners and classifies our response per coin:
@@ -143,11 +167,18 @@ Primary runtime: AWS EC2 Frankfurt. Mac = dev machine + fallback.
 - If SSH/monitoring fails with AWS auth errors: the bot runs fine on systemd — just note it.
 
 ## Current campaign state (update as things change)
-- ⛔ HALTED 2026-09-10: `hunt.service` stopped + disabled, `kill_live` in place, 0 open
-  positions, wallet flat at ~0.4005 SOL. Net live loss vs $49 top-up ≈ 0.089 SOL (~$8.90).
-  Do NOT restart without an explicit operator order. NOTE: AWS `.env` still
-  `HUNT_DRY_RUN=false` — the new live_armed gate refuses live without the marker,
-  but flip it to `true` before any manual start anyway.
+- ⛔ PAUSED 2026-09-11 (live session, no new opens): `hunt.service` ACTIVE in LIVE mode
+  (`.env HUNT_DRY_RUN=false`, `live_armed` set, no kill_live) but `paused` marker present —
+  new-open blocked, scanning/rejecting continues. Operator-paused after validation: all 6
+  species-A ACCEPTs in the 23:16 window (Rufus/Karen/RKC/GROK/CRISPE/TEDDY) were false-clean
+  dumps (see intel trap above). Wallet flat 0.3243 SOL, 0 open, 0 bags. First live entry
+  (Rufus, ven=amm, buy filled $5.58e-06/0.0545 SOL) proved the Jupiter-first buy fix;
+  its sell failed 12× then phantom-closed (now fixed — sell trap above). Resume ONLY after
+  a ground-truth on-chain top-10% gate fix + operator order.
+- ✅ SELL FIX DEPLOYED 2026-09-11 (`f2db50e`): `_sell_amm` = adaptive verified coin→WSOL
+  slice sell (halve until Jupiter routes a ≤1232-byte tx; count a slice ONLY if SOL balance
+  rose AND coins fell — never park value in quote, never phantom-close); `sell_now` refuses
+  to close a whole-balance exit that leaves coins behind. Tested: 25/25 local, live-active AWS.
 - ✅ HARDENED 2026-09-10 (local, ready-to-test, NOT deployed): tier counts LIVE
   realized PnL · DexScreener last-resort exit for blind graduates (Apple −98% class) ·
   loss-cap guard screams on failure · buy/sell within-tick retry + fill-gap alert ·
