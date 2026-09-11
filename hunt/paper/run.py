@@ -487,7 +487,7 @@ async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
 
 async def open_paper_position(mint: str, symbol: str, ds: DexScreener | None = None) -> bool:
     try:
-        logger.info("opening {} {}", mint[:8], symbol)
+        logger.info("opening {} {} feed={}", mint[:8], symbol, FEED is not None)
         price_sol = 0.0
         client = ds.client if ds else httpx.AsyncClient(timeout=10)
         if FEED is not None:
@@ -1166,8 +1166,12 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
 
 
 async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
-    global _NOTIFIER
+    global _NOTIFIER, FEED, _RUN_END_TS
     ensure_db()
+    from hunt.paper.execq import init as execq_init, offer_tick as _offer_tick
+    execq_init()
+    if FEED is None:
+        FEED = PriceFeed(on_tick=lambda mint, q: _offer_tick(mint, q.price_sol))
     from hunt.config import get_settings
     from hunt.notify.base import Notifier
     _s = get_settings()
@@ -1254,14 +1258,9 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
 
     # start pricing/exit engine + heartbeat + discovery stream
     from hunt.heartbeat.monitor import heartbeat_loop
-    from hunt.paper.execq import init as execq_init, open_worker, tick_workers
+    from hunt.paper.execq import open_worker, tick_workers
     from hunt.paper.smart_seed import smart_seed_loop
     from hunt.watch.discovery_ws import new_tokens_loop
-    execq_init()
-    from hunt.paper.execq import offer_tick as _offer_tick
-    global FEED
-    if FEED is None:
-        FEED = PriceFeed(on_tick=lambda mint, q: _offer_tick(mint, q.price_sol))
     stop_evt = asyncio.Event()
     tick_task = asyncio.create_task(tick_workers(stop_evt, 4))
     open_task = asyncio.create_task(open_worker(stop_evt, stats))
