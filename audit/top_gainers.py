@@ -74,7 +74,7 @@ def main():
     coins = {}
     min_usd = BIRTH_USD * MIN_X
     for complete in ("true", "false"):
-        for off in range(0, 2001, 100):
+            for off in range(0, 5001, 100):
             try:
                 batch = fetch("https://frontend-api-v3.pump.fun/coins",
                               params={"offset": off, "limit": 100, "sort": "market_cap",
@@ -109,7 +109,9 @@ def main():
                         (mint,)).fetchone()
         if pos:
             caught += 1
-            what = f"POSITION {pos['status']} {pos['exit_reason'] or ''} {pos[1]:+.4f} SOL"
+            pnl = pos["pnl_sol"]
+            pnl_s = f"{pnl:+.4f}" if pnl is not None else "open"
+            what = f"POSITION {pos['status']} {pos['exit_reason'] or ''} {pnl_s} SOL"
         elif dec:
             seen += 1
             what = f"{dec['decision']}: {dec['reason']}"
