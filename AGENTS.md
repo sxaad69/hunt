@@ -30,6 +30,7 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 - `hunt/exec/pumpfun/` — VENDORED pumpfun-python (MIT, unsigned instructions only, keys never enter it) — the exact PumpFun curve v2 buy/sell bytes incl. the sell-account SWAP quirk
 - `hunt/watch/price_feed.py` — real-time bonding-curve pricing (Helius `accountSubscribe`, one shared WS)
 - `hunt/watch/discovery_ws.py` — PumpPortal `subscribeNewToken` stream (sub-second discovery, free)
+- `hunt/gmgn/` — GMGN read-only CLI (`gmgn-cli`, demo key `gmgn_solbscbaseethmonadtron` when `HUNT_GMGN_API_KEY` unset). Node 22 at `/home/hunt/.local/node` on Linode. Plan-B wallet seed + trenches/smart-money discovery + flow-quality gates.
 - `hunt/paper/run.py::survival_filter` — gate chain (dust floor/ceiling, socials, model, intel, dev reputation)
 - `hunt/paper/run.py::_process_exit` — exit ladder (see strategy below)
 - `hunt/notify/` — Telegram alerts, control bot (`/status /positions /pnl /pause /kill`), daily digest
@@ -74,8 +75,8 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
   `--confirm` it only lists bags. Never scp one-off sell scripts.
 
 ## Strategy (current, frozen until evidence says otherwise)
-- **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; first judge at 90s). `curve_thin` / `curve_pct_unavailable` / `b_band_low` **defer** (retry 20s, max 20 min age) — not a terminal REJECT, so late fills/Starbucks-band B can still enter.
-- **Gates**: dust floor ≥50 SOL · A: ceiling ≤3000 SOL **and** curve fill ≥50% (`real_sol/85`, else `virtual−30`) · B: graduated vault FDV **3k–25k SOL** (Starbucks band; `b_band_high` terminal) · circulating top10>75% · Tracker snipers.totalPercentage>20 fail-closed · socials + survival model · serial_rugger (SQL fixed) · smart-wallet Plan B (GMGN seed; cannot override new universe gates) · WS/exec split Plan C (recv never awaits sell)
+- **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; first judge at 90s). Plus GMGN `track smartmoney` buys (≥$40, `*pump`) and `market trenches` (`new_creation`, min 1 smart-degen). `curve_thin` / `curve_pct_unavailable` / `b_band_low` **defer** (retry 20s, max 20 min age) — not a terminal REJECT, so late fills/Starbucks-band B can still enter.
+- **Gates**: dust floor ≥50 SOL · A: ceiling ≤3000 SOL **and** curve fill ≥50% (`real_sol/85`, else `virtual−30`) · B: graduated vault FDV **3k–25k SOL** (Starbucks band; `b_band_high` terminal) · circulating top10>75% · Tracker snipers.totalPercentage>20 fail-closed · socials + survival model · serial_rugger (SQL fixed) · GMGN flow-quality on ACCEPT (fail-open if CLI miss): bundler>50% / rat>25% / insider>25% / rug>40% / fresh>85% veto (`gmgn_*`); smart-degen/KOL annotated · smart-wallet Plan B (GMGN demo-key seed; cannot override new universe gates incl. `gmgn_`) · WS/exec split Plan C (recv never awaits sell)
 - **tracker_json**: paper_decisions stores Tracker `risk` object when Tracker was called.
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after.
@@ -185,6 +186,7 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 - ⛔ **AWS GONE 2026-09-11**: EC2 `i-0d567877feac30c13` terminated. Runtime moves to **Linode** (no instance yet).
 - ⛔ **NO LIVE TRADING** until feeds/pricing/intel are fixed once and for all, then operator order on a Linode host. Mac stays `HUNT_DRY_RUN=true`.
 - 📄 **Paper 2026-09-12**: starve-A (curve fill ≥50%) + B 3k–25k SOL. KPI = do ACCEPTs now cluster on graduating/Starbucks-class instead of 86-SOL dumps. Live frozen.
+- 📄 **Paper 2026-09-12 GMGN**: Plan-B unlatched (demo key, no personal API key). Linode Node 22 + `gmgn-cli` 1.6.2. Discovery = PumpPortal + smart-money buys + trenches(min 1 smart-degen). Flow gates fail-open on CLI miss. Live frozen.
 - ⛔ PAUSED 2026-09-11 (last AWS live session, historical): operator-paused after validation: all 6
   species-A ACCEPTs in the 23:16 window (Rufus/Karen/RKC/GROK/CRISPE/TEDDY) were false-clean
   dumps (see intel trap above). Wallet was flat 0.3243 SOL, 0 open, 0 bags. First live entry

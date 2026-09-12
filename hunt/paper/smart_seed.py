@@ -1,7 +1,7 @@
 """Plan B: fill wallets+edges so check_smart_buy can fire.
 
-Uses GMGN top traders on recent ACCEPT mints when a key exists.
-Wallets with 2+ distinct profitable tokens become status=tracked.
+Uses GMGN demo-key read-only CLI (smart-money buys + top traders on ACCEPTs).
+Wallets with 2+ distinct tokens become status=tracked.
 """
 from __future__ import annotations
 
@@ -68,17 +68,19 @@ def _promote_multi() -> int:
 async def seed_once() -> None:
     from hunt.config import get_settings
     s = get_settings()
-    if not s.gmgn_api_key:
-        logger.info("smart-seed idle — no GMGN key, tracked={}", tracked_count())
-        return
     mints = _recent_accept_mints(12)
-    if not mints:
-        logger.info("smart-seed idle — no ACCEPT mints yet, tracked={}", tracked_count())
-        return
     try:
         from hunt.gmgn.client import GmgnClient
         client = GmgnClient(s.gmgn_api_key)
         added = 0
+        trades = await client.smart_money_trades(limit=80)
+        for t in trades:
+            if t.side.lower() != "buy" or not t.wallet or not t.mint:
+                continue
+            if t.amount_usd < 40:
+                continue
+            _upsert_edge(t.wallet, t.mint, "gmgn_smartmoney", 0)
+            added += 1
         for mint in mints:
             traders = await client.token_top_traders(mint, limit=8)
             for i, t in enumerate(traders or []):

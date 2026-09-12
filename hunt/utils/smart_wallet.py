@@ -32,8 +32,6 @@ async def check_smart_buy(mint: str) -> tuple[bool, str]:
         from hunt.gmgn.client import GmgnClient
         from hunt.config import get_settings
         s=get_settings()
-        if not s.gmgn_api_key:
-            return False, ""
         client=GmgnClient(s.gmgn_api_key)
         traders=await client.token_top_traders(mint, limit=10)
         if not traders:

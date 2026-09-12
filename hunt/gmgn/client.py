@@ -13,6 +13,15 @@ from loguru import logger
 DEMO_KEY = "gmgn_solbscbaseethmonadtron"
 
 
+def unwrap_payload(parsed):
+    if isinstance(parsed, dict) and "data" in parsed and "code" in parsed:
+        if parsed.get("code") not in (0, "0", None):
+            return None
+        inner = parsed.get("data")
+        return inner if isinstance(inner, dict) else parsed
+    return parsed
+
+
 @dataclass
 class SmartTrade:
     wallet: str
@@ -81,10 +90,14 @@ class GmgnClient:
                 logger.debug("gmgn-cli rc={} err={}", proc.returncode, err_text)
                 return None
             try:
-                return json.loads(out.decode().strip().splitlines()[-1])
+                parsed = json.loads(out.decode().strip().splitlines()[-1])
             except Exception:
                 logger.debug("gmgn-cli unparseable output: {}", out.decode()[:150])
                 return None
+            out_parsed = unwrap_payload(parsed)
+            if out_parsed is None and isinstance(parsed, dict) and parsed.get("code") not in (0, "0", None):
+                logger.debug("gmgn code={} msg={}", parsed.get("code"), parsed.get("message"))
+            return out_parsed
         return None
 
     async def smart_money_trades(self, chain: str = "sol", limit: int = 100) -> list[SmartTrade]:
@@ -182,6 +195,69 @@ class GmgnClient:
     async def wallet_activity(self, wallet: str) -> list[dict]:
         data = await self._run(["portfolio", "activity", "--chain", "sol", "--wallet", wallet])
         return (data or {}).get("list") or (data or {}).get("activities") or []
+
+    async def token_info(self, mint: str) -> Optional[dict]:
+        data = await self._run(["token", "info", "--chain", "sol", "--address", mint])
+        return data if isinstance(data, dict) else None
+
+    async def trenches(
+        self,
+        chain: str = "sol",
+        types: tuple[str, ...] = ("new_creation",),
+        limit: int = 40,
+        min_smart: int = 1,
+    ) -> list[dict]:
+        args = ["market", "trenches", "--chain", chain, "--limit", str(limit)]
+        for t in types:
+            args += ["--type", t]
+        if min_smart:
+            args += ["--min-smart-degen-count", str(min_smart)]
+        data = await self._run(args)
+        out: list[dict] = []
+        if not isinstance(data, dict):
+            return out
+        for t in types:
+            for row in data.get(t) or []:
+                if isinstance(row, dict):
+                    out.append(row)
+        if not out:
+            for row in data.get("list") or []:
+                if isinstance(row, dict):
+                    out.append(row)
+        return out
+
+    async def market_signal(self, chain: str = "sol", signal_type: int = 12) -> list[dict]:
+        data = await self._run([
+            "market", "signal", "--chain", chain, "--signal-type", str(signal_type),
+        ])
+        if not isinstance(data, dict):
+            return []
+        for key in ("list", "signals", "items"):
+            rows = data.get(key)
+            if isinstance(rows, list):
+                return [r for r in rows if isinstance(r, dict)]
+        return []
+
+    async def kol_trades(self, chain: str = "sol", limit: int = 50) -> list[SmartTrade]:
+        data = await self._run(["track", "kol", "--chain", chain, "--limit", str(limit)])
+        trades: list[SmartTrade] = []
+        for t in (data or {}).get("list") or []:
+            maker = t.get("maker")
+            base = t.get("base_address")
+            if not maker or not base:
+                continue
+            sym = ((t.get("base_token") or {}).get("symbol")) or None
+            trades.append(
+                SmartTrade(
+                    wallet=maker,
+                    mint=base,
+                    symbol=sym,
+                    side=t.get("side") or "",
+                    amount_usd=float(t.get("amount_usd") or 0),
+                    ts=int(t.get("timestamp") or 0),
+                )
+            )
+        return trades
 
 
 def day_of_ts(ts: int) -> str:
