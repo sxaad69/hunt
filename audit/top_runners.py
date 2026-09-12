@@ -53,7 +53,7 @@ def main():
     caught = rejected = unseen = 0
     for sym, mint, usd, age_h in coins:
         mult = usd / BIRTH_USD
-        pos = c.execute("SELECT status, ROUND(pnl_sol,4), exit_reason FROM positions WHERE mint=?",
+        pos = c.execute("SELECT status, ROUND(pnl_sol,4) AS pnl_sol, exit_reason FROM positions WHERE mint=?",
                         (mint,)).fetchone()
         dec = c.execute("SELECT decision, reason, ROUND(market_cap,0) FROM paper_decisions WHERE mint=?",
                         (mint,)).fetchone()
