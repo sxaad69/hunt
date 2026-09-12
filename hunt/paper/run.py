@@ -1033,16 +1033,6 @@ async def paper_stops_loop(stop_event: asyncio.Event):
                 if price <= 0:
                     continue
                 await _process_exit(pos["id"], pos["mint"], price)
-            for pos in positions:
-                hold_cap = 24*3600 if int(pos["tp_tier"] or 0) >= 2 else 6*3600
-                if now - pos["opened_ts"] > hold_cap:
-                    price = 0.0
-                    if FEED is not None:
-                        q = FEED.stale_quote(pos["mint"], 600.0)
-                        price = q.price_sol if q else 0.0
-                    if price <= 0:
-                        price = _entry_sol(pos)
-                    await _force_close(pos["id"], pos["mint"], price, 0.0, "max_hold")
         except Exception as e:
             logger.debug("paper stops poll error {}", e)
         try:
