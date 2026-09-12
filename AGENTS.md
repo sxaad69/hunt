@@ -176,6 +176,8 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 - Caveat (by design): gainer-ranked = survivor-biased — dusted coins fall off rankings, so the SL-death
   class is INVISIBLE to this script; it sizes the upside, not the downside. Current mcap is also a lower
   bound (peak-then-dump missed).
+- `sl_peak.py [n] [hours]` — today's SL fills vs GMGN ATH mcap (no OHLCV). fold_ath = ATH / entry.
+  `.venv/bin/python audit/sl_peak.py 7 24`
 
 ## Monitoring
 - Campaign host = Linode (once created). Mac = standby / paper.
