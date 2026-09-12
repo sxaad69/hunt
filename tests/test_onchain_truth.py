@@ -145,6 +145,10 @@ def test_apply_smart_gate_requires_tracked():
     assert ok and reason.startswith("smart_boost_")
     ok, reason = apply_smart_gate(False, "dust_mcap_1", True, "tracked_abc")
     assert not ok and reason.startswith("dust_mcap_")
+    ok, reason = apply_smart_gate(False, "dust_mcap_29", True, "tracked_abc")
+    assert not ok
+    ok, reason = apply_smart_gate(False, "dust_mcap_41", True, "tracked_abc")
+    assert ok and reason.startswith("smart_boost_")
     ok, reason = apply_smart_gate(False, "top10_heavy_90", True, "tracked_abc")
     assert not ok
 

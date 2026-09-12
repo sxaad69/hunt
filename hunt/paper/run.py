@@ -193,6 +193,7 @@ B_BAND_LOW_SOL = 3000.0
 B_BAND_HIGH_SOL = 25000.0
 CURVE_DEFER_MAX_AGE_S = 1200.0
 WAITLIST_RETRY_S = 20.0
+SMART_DUST_FLOOR_SOL = 30.0
 
 _NOTIFIER = None  # telegram alerts, started in run_paper
 _fx_ts = 0.0
@@ -500,12 +501,26 @@ async def _onchain_mcap(
 _SMART_LOCKED = (
     "intel_unavailable", "mcap_unavailable", "top10_heavy", "graduated",
     "snipers_", "rugged", "curve_thin", "curve_pct_unavailable", "b_band_",
-    "gmgn_", "dust_mcap",
+    "gmgn_",
 )
+
+
+def _dust_sol(reason: str) -> float | None:
+    if not reason.startswith("dust_mcap_"):
+        return None
+    try:
+        return float(reason[len("dust_mcap_"):])
+    except ValueError:
+        return None
 
 
 def apply_smart_gate(accept: bool, reason: str, is_smart: bool, who: str) -> tuple[bool, str]:
     if is_smart and not accept:
+        dust = _dust_sol(reason)
+        if dust is not None:
+            if dust >= SMART_DUST_FLOOR_SOL:
+                return True, f"smart_boost_{who}"
+            return False, reason
         if not reason.startswith(_SMART_LOCKED):
             return True, f"smart_boost_{who}"
         return False, reason
