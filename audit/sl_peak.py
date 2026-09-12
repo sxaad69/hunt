@@ -15,9 +15,13 @@ import asyncio
 import sqlite3
 import sys
 import time
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_node = Path("/home/hunt/.local/node/bin")
+if _node.is_dir():
+    os.environ["PATH"] = str(_node) + os.pathsep + os.environ.get("PATH", "")
 
 import httpx
 
