@@ -1,7 +1,8 @@
-"""Plan B: fill wallets+edges so check_smart_buy can fire.
+"""Plan B: seed local wallets+edges from GMGN smart-money buys.
 
-Uses GMGN demo-key read-only CLI (smart-money buys + top traders on ACCEPTs).
-Wallets with 2+ distinct tokens become status=tracked.
+GMGN is the seeder only (every 8 min). ACCEPT top-traders are never promoted.
+Wallets with 2+ distinct *pump mints from gmgn_smartmoney become status=tracked.
+check_smart_buy reads that table — no live GMGN on the judge path.
 """
 from __future__ import annotations
 
@@ -12,27 +13,20 @@ import time
 from loguru import logger
 
 DB = "hunt/data/hunt.sqlite3"
+SEED_INTERVAL_S = 480.0
+MIN_BUY_USD = 40.0
 
 
 def tracked_count() -> int:
     try:
         conn = sqlite3.connect(DB, timeout=10)
-        n = conn.execute("SELECT COUNT(*) FROM wallets WHERE status='tracked'").fetchone()[0]
+        n = conn.execute(
+            "SELECT COUNT(*) FROM wallets WHERE status='tracked' AND source='gmgn_smartmoney'"
+        ).fetchone()[0]
         conn.close()
         return int(n or 0)
     except Exception:
         return 0
-
-
-def _recent_accept_mints(limit: int = 15) -> list[str]:
-    conn = sqlite3.connect(DB, timeout=10)
-    rows = conn.execute(
-        "SELECT mint FROM paper_decisions WHERE decision='ACCEPT' "
-        "ORDER BY decided_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [r[0] for r in rows if r and r[0]]
 
 
 def _upsert_edge(wallet: str, mint: str, source: str, rank: int) -> None:
@@ -52,14 +46,23 @@ def _upsert_edge(wallet: str, mint: str, source: str, rank: int) -> None:
 
 def _promote_multi() -> int:
     conn = sqlite3.connect(DB, timeout=10)
+    conn.execute(
+        "UPDATE wallets SET status='candidate' WHERE source!='gmgn_smartmoney' AND status='tracked'"
+    )
     rows = conn.execute(
-        """SELECT wallet, COUNT(DISTINCT mint) n FROM wallet_token_edges
-           GROUP BY wallet HAVING n >= 2"""
+        """SELECT e.wallet, COUNT(DISTINCT e.mint) n
+           FROM wallet_token_edges e
+           JOIN wallets w ON w.address=e.wallet
+           WHERE e.source='gmgn_smartmoney' AND w.source='gmgn_smartmoney'
+           GROUP BY e.wallet HAVING n >= 2"""
     ).fetchall()
     n = 0
     for w, _c in rows:
-        conn.execute("UPDATE wallets SET status='tracked' WHERE address=? AND status!='tracked'", (w,))
-        n += conn.total_changes
+        cur = conn.execute(
+            "UPDATE wallets SET status='tracked' WHERE address=? AND source='gmgn_smartmoney' AND status!='tracked'",
+            (w,),
+        )
+        n += cur.rowcount or 0
     conn.commit()
     conn.close()
     return n
@@ -68,37 +71,27 @@ def _promote_multi() -> int:
 async def seed_once() -> None:
     from hunt.config import get_settings
     s = get_settings()
-    mints = _recent_accept_mints(12)
     try:
         from hunt.gmgn.client import GmgnClient
         client = GmgnClient(s.gmgn_api_key)
         added = 0
         trades = await client.smart_money_trades(limit=80)
         for t in trades:
-            if t.side.lower() != "buy" or not t.wallet or not t.mint:
+            mint = t.mint or ""
+            if t.side.lower() != "buy" or not t.wallet or not mint.endswith("pump"):
                 continue
-            if t.amount_usd < 40:
+            if t.amount_usd < MIN_BUY_USD:
                 continue
-            _upsert_edge(t.wallet, t.mint, "gmgn_smartmoney", 0)
+            _upsert_edge(t.wallet, mint, "gmgn_smartmoney", 0)
             added += 1
-        for mint in mints:
-            traders = await client.token_top_traders(mint, limit=8)
-            for i, t in enumerate(traders or []):
-                addr = t.get("address") or t.get("wallet") or ""
-                pnl = float(t.get("realized_profit") or 0)
-                if not addr or pnl <= 0 or t.get("is_suspicious"):
-                    continue
-                _upsert_edge(addr, mint, "gmgn_toptrader", i + 1)
-                added += 1
-            await asyncio.sleep(1.0)
         promoted = _promote_multi()
-        logger.info("smart-seed mints={} edges+={} promoted={} tracked={}",
-                    len(mints), added, promoted, tracked_count())
+        logger.info("smart-seed edges+={} promoted={} tracked={}",
+                    added, promoted, tracked_count())
     except Exception as e:
         logger.info("smart-seed idle — {} (tracked={})", e, tracked_count())
 
 
-async def smart_seed_loop(stop_event: asyncio.Event, interval_s: float = 900.0) -> None:
+async def smart_seed_loop(stop_event: asyncio.Event, interval_s: float = SEED_INTERVAL_S) -> None:
     await seed_once()
     while not stop_event.is_set():
         try:

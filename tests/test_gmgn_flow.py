@@ -63,3 +63,58 @@ def test_flow_rejects():
     assert not ok and reason.startswith("gmgn_fresh_")
     ok, reason = flow_verdict({"bundler": 0.49, "rat": 0.24})
     assert ok
+
+
+def _wallet_db(tmp_path):
+    import sqlite3
+    p = tmp_path / "hunt.sqlite3"
+    conn = sqlite3.connect(p)
+    conn.executescript(
+        """
+        CREATE TABLE wallets (
+            address TEXT PRIMARY KEY, source TEXT, status TEXT,
+            first_token TEXT, added_at INTEGER
+        );
+        CREATE TABLE wallet_token_edges (
+            wallet TEXT, mint TEXT, day TEXT, source TEXT, rank_in_token INTEGER,
+            PRIMARY KEY (wallet, mint, day)
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    return str(p)
+
+
+def test_promote_only_smartmoney(tmp_path, monkeypatch):
+    import hunt.paper.smart_seed as ss
+    db = _wallet_db(tmp_path)
+    monkeypatch.setattr(ss, "DB", db)
+    ss._upsert_edge("W1", "aaaPump", "gmgn_smartmoney", 0)
+    ss._upsert_edge("W1", "bbbPump", "gmgn_smartmoney", 0)
+    ss._upsert_edge("W2", "cccPump", "gmgn_toptrader", 1)
+    ss._upsert_edge("W2", "dddPump", "gmgn_toptrader", 1)
+    n = ss._promote_multi()
+    assert n == 1
+    import sqlite3
+    conn = sqlite3.connect(db)
+    tracked = {r[0]: r[1] for r in conn.execute("SELECT address, status FROM wallets")}
+    conn.close()
+    assert tracked["W1"] == "tracked"
+    assert tracked["W2"] == "candidate"
+
+
+def test_check_smart_buy_local_only(tmp_path, monkeypatch):
+    import asyncio
+    import hunt.utils.smart_wallet as sw
+    import hunt.paper.smart_seed as ss
+    db = _wallet_db(tmp_path)
+    monkeypatch.setattr(sw, "DB", db)
+    monkeypatch.setattr(ss, "DB", db)
+    ss._upsert_edge("W1", "aaaPump", "gmgn_smartmoney", 0)
+    ss._upsert_edge("W1", "bbbPump", "gmgn_smartmoney", 0)
+    ss._promote_multi()
+    ok, who = asyncio.run(sw.check_smart_buy("aaaPump"))
+    assert ok and who.startswith("tracked_")
+    ok, who = asyncio.run(sw.check_smart_buy("zzzPump"))
+    assert (ok, who) == (False, "")

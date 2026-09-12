@@ -1351,27 +1351,9 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
     stops_task = asyncio.create_task(paper_stops_loop(stop_evt))
     hb_task = asyncio.create_task(heartbeat_loop(stop_evt, 60))
     disc_task = asyncio.create_task(new_tokens_loop(stop_evt, on_new_token))
-
-    async def on_gmgn_token(coin: dict):
-        mint = coin.get("mint") or ""
-        if not mint or mint in seen:
-            return
-        seen.add(mint)
-        stats["total_scanned"] += 1
-        try:
-            queue.put_nowait(coin)
-        except asyncio.QueueFull:
-            try:
-                queue.get_nowait()
-                queue.put_nowait(coin)
-            except Exception:
-                pass
-
-    from hunt.paper.gmgn_discover import gmgn_discover_loop
-    gmgn_task = asyncio.create_task(gmgn_discover_loop(stop_evt, on_gmgn_token))
     from hunt.notify.paper_control import run_paper_control
     ctrl_task = asyncio.create_task(run_paper_control(stop_evt))
-    logger.info("[paper] event-driven discovery active (pumpportal + gmgn smart-money/trenches) + 60s safety poll")
+    logger.info("[paper] event-driven discovery active (pumpportal stream) + 60s safety poll")
 
     async with httpx.AsyncClient(timeout=20) as client:
         ds_for_open = DexScreener(client)
@@ -1475,7 +1457,7 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
                 await asyncio.sleep(min(300, max(0, end - time.time())))
 
     stop_evt.set()
-    for t in (hb_task, disc_task, stops_task, ctrl_task, tick_task, open_task, smart_task, gmgn_task):
+    for t in (hb_task, disc_task, stops_task, ctrl_task, tick_task, open_task, smart_task):
         try: t.cancel()
         except: pass
     try:
