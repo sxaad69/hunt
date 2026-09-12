@@ -128,9 +128,25 @@ def test_should_defer_thin_until_age_cap():
     assert _should_defer("curve_thin_12", coin)
     assert _should_defer("curve_pct_unavailable", coin)
     assert _should_defer("b_band_low_400", coin)
+    assert _should_defer("no_smart_wallet", coin)
     assert not _should_defer("b_band_high_40000", coin)
     coin["created_timestamp"] = int((time.time() - 1300) * 1000)
     assert not _should_defer("curve_thin_12", coin)
+    assert not _should_defer("no_smart_wallet", coin)
+
+
+def test_apply_smart_gate_requires_tracked():
+    from hunt.paper.run import apply_smart_gate
+    ok, reason = apply_smart_gate(True, "pass", False, "")
+    assert (ok, reason) == (False, "no_smart_wallet")
+    ok, reason = apply_smart_gate(True, "pass", True, "tracked_abc")
+    assert ok and reason.endswith("+smart_tracked_abc")
+    ok, reason = apply_smart_gate(False, "no_socials", True, "tracked_abc")
+    assert ok and reason.startswith("smart_boost_")
+    ok, reason = apply_smart_gate(False, "dust_mcap_1", True, "tracked_abc")
+    assert not ok and reason.startswith("dust_mcap_")
+    ok, reason = apply_smart_gate(False, "top10_heavy_90", True, "tracked_abc")
+    assert not ok
 
 
 def test_stale_api_timestamp_does_not_kill_live_curve():

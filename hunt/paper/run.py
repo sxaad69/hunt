@@ -497,9 +497,28 @@ async def _onchain_mcap(
         return None
 
 
+_SMART_LOCKED = (
+    "intel_unavailable", "mcap_unavailable", "top10_heavy", "graduated",
+    "snipers_", "rugged", "curve_thin", "curve_pct_unavailable", "b_band_",
+    "gmgn_", "dust_mcap",
+)
+
+
+def apply_smart_gate(accept: bool, reason: str, is_smart: bool, who: str) -> tuple[bool, str]:
+    if is_smart and not accept:
+        if not reason.startswith(_SMART_LOCKED):
+            return True, f"smart_boost_{who}"
+        return False, reason
+    if is_smart and accept:
+        return True, f"{reason}+smart_{who}"
+    if accept and not is_smart:
+        return False, "no_smart_wallet"
+    return accept, reason
+
+
 def _should_defer(reason: str, coin: dict) -> bool:
     if not (reason.startswith("curve_thin") or reason == "curve_pct_unavailable"
-            or reason.startswith("b_band_low")):
+            or reason.startswith("b_band_low") or reason == "no_smart_wallet"):
         return False
     created = int(coin.get("created_timestamp") or 0) / 1000.0
     if created <= 0:
@@ -1155,24 +1174,19 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
         except Exception:
             pass
 
-    # smart wallet boost (automaton replication lineage: if tracked wallet bought, boost)
     smart_reason = ""
     try:
         from hunt.utils.smart_wallet import check_smart_buy
         is_smart, who = await check_smart_buy(mint)
-        if is_smart and not accept:
-            locked = reason.startswith((
-                "intel_unavailable", "mcap_unavailable", "top10_heavy", "graduated",
-                "snipers_", "rugged", "curve_thin", "curve_pct_unavailable", "b_band_",
-                "gmgn_",
-            ))
-            if not locked:
-                accept = True
-                reason = f"smart_boost_{who}"
-                smart_reason = who
-        elif is_smart:
-            reason = f"{reason}+smart_{who}"
-    except: pass
+        accept, reason = apply_smart_gate(accept, reason, is_smart, who)
+        if is_smart:
+            smart_reason = who
+    except Exception:
+        if accept:
+            accept, reason = False, "no_smart_wallet"
+    if not accept and _should_defer(reason, coin):
+        logger.debug("DEFER {} {} ({})", mint[:8], symbol, reason)
+        return "defer"
     if accept:
         try:
             from hunt.gmgn.client import GmgnClient
