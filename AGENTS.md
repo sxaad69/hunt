@@ -79,6 +79,7 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 - **tracker_json**: paper_decisions stores Tracker `risk` object when Tracker was called.
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after.
+  AMM bags: vaults only (curve PDA unsubbed on promote). Cap is real WS accounts (~40), not mint count.
   Ladder is **SOL-native** (`price_sol` / `entry_price_sol` / `peak_price_sol`). No 45s SOL/USD poll.
   Telegram may fetch Dex/Gecko FX **on notify only**. Gecko/Jupiter are not marks.
 - **Species-B REOPENED 2026-09-08 (decision, historical)**: ceiling gate commented (`run.py`)

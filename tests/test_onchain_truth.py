@@ -190,6 +190,34 @@ def test_snipers_zero_pct_is_pass():
     assert ok and reason == "risk_3"
 
 
+def test_drop_curve_leaves_amm_tracking():
+    import asyncio
+    from hunt.watch.price_feed import PriceFeed
+    f = PriceFeed(url="wss://example.invalid")
+    f._mints["mint1"] = "pda1"
+    f._curve_to_mint["pda1"] = "mint1"
+    f._sub_ids["pda1"] = 11
+    f._amm_state["mint1"] = {"base_vault": "b", "quote_vault": "q", "base_raw": 1, "quote_raw": 1}
+    f._sub_ids["b"] = 12
+    f._sub_ids["q"] = 13
+    asyncio.run(f._drop_curve("mint1"))
+    assert "mint1" not in f._mints
+    assert "pda1" not in f._sub_ids
+    assert "pda1" not in f._curve_to_mint
+    assert "b" in f._sub_ids and "q" in f._sub_ids
+    assert "mint1" in asyncio.run(f.subscribed_mints())
+
+
+def test_room_for_counts_real_ws_accounts():
+    from hunt.watch.price_feed import MAX_SUBSCRIPTIONS, PriceFeed
+    f = PriceFeed(url="wss://example.invalid")
+    for i in range(MAX_SUBSCRIPTIONS):
+        f._sub_ids[f"a{i}"] = i
+    assert not f._room_for(1)
+    f._sub_ids.pop("a0")
+    assert f._room_for(1)
+
+
 def test_execq_tick_does_not_await():
     from hunt.paper import execq
     execq._tick_q = None

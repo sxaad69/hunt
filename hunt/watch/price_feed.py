@@ -126,8 +126,14 @@ class PriceFeed:
         q = self.stale_quote(mint)
         return q.price_usd if q else 0.0
 
+    def _ws_acct_count(self) -> int:
+        return len(self._sub_ids) + len(self._pending)
+
+    def _room_for(self, n: int) -> bool:
+        return self._ws_acct_count() + n <= MAX_SUBSCRIPTIONS
+
     async def ensure_priced(self, mint: str, pool_address: str | None = None) -> Quote | None:
-        """WS-first mark: curve subscribe, promote to PumpSwap vaults if graduated."""
+        """WS-first mark: curve PDA if live; vaults only if graduated."""
         await self.subscribe(mint)
         q = self._quotes.get(mint)
         if (not q or q.price_sol <= 0) and mint in self._mints:
@@ -141,30 +147,30 @@ class PriceFeed:
         return self.stale_quote(mint, 300.0)
 
     async def subscribe(self, mint: str):
-        if mint in self._mints:
-            return
-        if len(self._mints) >= MAX_SUBSCRIPTIONS:
-            logger.debug("[price-feed] subscription cap {} reached — skipping {}", MAX_SUBSCRIPTIONS, mint[:8])
+        if mint in self._amm_state or mint in self._mints:
             return
         try:
             pda = bonding_curve_pda(mint)
         except Exception:
-            return  # not a valid solana mint (evm address etc.)
-        self._mints[mint] = pda
-        self._curve_to_mint[pda] = mint
+            return
         self._quotes.setdefault(mint, Quote(mint=mint))
         await self._mint_decimals(mint)
         await self._seed_quote(mint, pda)
+        q = self._quotes.get(mint)
+        if q and q.graduated:
+            await self._promote_amm(mint)
+            return
+        if not self._room_for(1):
+            logger.debug("[price-feed] subscription cap {} reached — skipping {}", MAX_SUBSCRIPTIONS, mint[:8])
+            return
+        self._mints[mint] = pda
+        self._curve_to_mint[pda] = mint
         if self._ws is not None:
             await self._send_subscribe(pda)
 
     async def unsubscribe(self, mint: str):
-        pda = self._mints.pop(mint, None)
-        if not pda:
-            return
-        self._curve_to_mint.pop(pda, None)
+        await self._drop_curve(mint)
         self._quotes.pop(mint, None)
-        await self._unsub_account(pda)
         st = self._amm_state.pop(mint, None)
         if st:
             for key in ("base_vault", "quote_vault"):
@@ -173,8 +179,15 @@ class PriceFeed:
                     self._amm_vaults.pop(vault, None)
                     await self._unsub_account(vault)
 
+    async def _drop_curve(self, mint: str):
+        pda = self._mints.pop(mint, None)
+        if not pda:
+            return
+        self._curve_to_mint.pop(pda, None)
+        await self._unsub_account(pda)
+
     async def subscribed_mints(self) -> list[str]:
-        return list(self._mints.keys())
+        return list(set(self._mints) | set(self._amm_state))
 
     async def refresh_sol_usd(self):
         try:
@@ -249,7 +262,8 @@ class PriceFeed:
         hb_last = -1
         while not stop_event.is_set():
             await asyncio.sleep(60)
-            line = f"[price-feed] hb: subs={len(self._sub_ids)} ticks={self.ticks_received}"
+            line = (f"[price-feed] hb: subs={len(self._sub_ids)} "
+                    f"curve={len(self._mints)} amm={len(self._amm_state)} ticks={self.ticks_received}")
             if self.ticks_received != hb_last or time.time() - last_info > 300:
                 logger.info(line)
                 last_info = time.time()
@@ -322,6 +336,7 @@ class PriceFeed:
             st0 = self._amm_state.get(mint)
             if st0 and st0.get("base_raw", 0) > 0 and st0.get("quote_raw", 0) > 0:
                 self._apply_amm_quote(mint)
+                await self._drop_curve(mint)
                 return
             await self._promote_amm_locked(mint, pool_address)
 
@@ -348,6 +363,15 @@ class PriceFeed:
             return
         base_vault = str(st.pool_base_token_account)
         quote_vault = str(st.pool_quote_token_account)
+        extra = 0
+        if base_vault not in self._sub_ids and base_vault not in self._pending:
+            extra += 1
+        if quote_vault not in self._sub_ids and quote_vault not in self._pending:
+            extra += 1
+        freed = 1 if mint in self._mints else 0
+        if extra - freed > 0 and not self._room_for(extra - freed):
+            logger.debug("[price-feed] no room for AMM vaults {}", mint[:8])
+            return
         self._amm_state[mint] = {
             "base_vault": base_vault, "quote_vault": quote_vault,
             "base_raw": 0, "quote_raw": 0,
@@ -359,8 +383,9 @@ class PriceFeed:
         if self._ws is not None:
             await self._send_subscribe(base_vault)
             await self._send_subscribe(quote_vault)
+        await self._drop_curve(mint)
         self._apply_amm_quote(mint)
-        logger.info("[price-feed] AMM ws {} pool={}", mint[:8], pool_address[:8])
+        logger.info("[price-feed] AMM ws {} pool={} (curve unsubbed)", mint[:8], pool_address[:8])
 
     async def _seed_vault(self, mint: str, field: str, vault: str):
         try:
