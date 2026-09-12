@@ -74,7 +74,7 @@ def main():
     coins = {}
     min_usd = BIRTH_USD * MIN_X
     for complete in ("true", "false"):
-            for off in range(0, 5001, 100):
+        for off in range(0, 5001, 100):
             try:
                 batch = fetch("https://frontend-api-v3.pump.fun/coins",
                               params={"offset": off, "limit": 100, "sort": "market_cap",
