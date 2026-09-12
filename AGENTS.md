@@ -74,8 +74,8 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
   `--confirm` it only lists bags. Never scp one-off sell scripts.
 
 ## Strategy (current, frozen until evidence says otherwise)
-- **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; judge at 90s with live mcap)
-- **Gates**: dust floor ≥50 SOL · ceiling ≤3000 SOL species-A only (graduated B: no ceiling in code) · circulating top10>75% · Tracker snipers.totalPercentage>20 fail-closed · socials + survival model · serial_rugger (SQL fixed) · smart-wallet Plan B (GMGN seed) · WS/exec split Plan C (recv never awaits sell)
+- **Discovery**: PumpPortal stream → 90s waitlist (coins are born ~28 SOL mcap; first judge at 90s). `curve_thin` / `curve_pct_unavailable` / `b_band_low` **defer** (retry 20s, max 20 min age) — not a terminal REJECT, so late fills/Starbucks-band B can still enter.
+- **Gates**: dust floor ≥50 SOL · A: ceiling ≤3000 SOL **and** curve fill ≥50% (`real_sol/85`, else `virtual−30`) · B: graduated vault FDV **3k–25k SOL** (Starbucks band; `b_band_high` terminal) · circulating top10>75% · Tracker snipers.totalPercentage>20 fail-closed · socials + survival model · serial_rugger (SQL fixed) · smart-wallet Plan B (GMGN seed; cannot override new universe gates) · WS/exec split Plan C (recv never awaits sell)
 - **tracker_json**: paper_decisions stores Tracker `risk` object when Tracker was called.
 - **Exits**: SL −20% pre-tier · bank 50% @ +40% · 25% @ +60% · breakeven floor between tiers · moon bag (25%) laddered trail: 30% <3x → 20% @3x → 12% @10x → 8% @50x · max_hold 6h (24h for bags)
 - **Pricing**: Helius WS for BOTH stages — bonding-curve PDA pre-grad, PumpSwap vault ATAs after.
@@ -95,8 +95,7 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
   The 09-08 reopen decision is NOT reversed permanently — the evidence review stands
   (see below), but for THIS live session only species-A curve-stage rides ≤3000 SOL
   are huntable. `specb_mcap_audit.py` keeps monitoring the class.
-- **Paper 2026-09-11 BOTH entry classes**: curve 50–3000 SOL **and** post-grad AMM
-  (vault FDV ≥50, no ceiling). Live still frozen. Tracker `risk_7+` still vetoes.
+- **Paper 2026-09-12 starve-A + B band** (one tweak): stop 90s early-curve spray (256 A −1.58 SOL, median 86). A only if curve fill ≥50%. B only 3k–25k SOL FDV. Dust stays 50. Live still frozen. Tracker sniper% still vetoes.
 - **SL-death measurement IN (2026-09-09, `audit/specb_sl_death.py`)**: population =
   all 802 species-B mints we saw in 48h; sniper/top10 gates still veto 729 (91%),
   so only **73 are playable**. Of those 73: **dusted (fold<0.2) = 31.5%** ← the
@@ -185,7 +184,7 @@ Primary runtime: **Linode** (replaces AWS). Mac = dev machine + paper-only.
 ## Current campaign state (update as things change)
 - ⛔ **AWS GONE 2026-09-11**: EC2 `i-0d567877feac30c13` terminated. Runtime moves to **Linode** (no instance yet).
 - ⛔ **NO LIVE TRADING** until feeds/pricing/intel are fixed once and for all, then operator order on a Linode host. Mac stays `HUNT_DRY_RUN=true`.
-- 📄 **This paper run (Mac, 2026-09-11)**: KPI = which ACCEPTs fire under on-chain mcap+top10 + Helius marks. So far 0 ACCEPT — coins that clear those gates die on SolanaTracker `risk_7+`. Log: `/tmp/hunt_paper_qa.log`.
+- 📄 **Paper 2026-09-12**: starve-A (curve fill ≥50%) + B 3k–25k SOL. KPI = do ACCEPTs now cluster on graduating/Starbucks-class instead of 86-SOL dumps. Live frozen.
 - ⛔ PAUSED 2026-09-11 (last AWS live session, historical): operator-paused after validation: all 6
   species-A ACCEPTs in the 23:16 window (Rufus/Karen/RKC/GROK/CRISPE/TEDDY) were false-clean
   dumps (see intel trap above). Wallet was flat 0.3243 SOL, 0 open, 0 bags. First live entry

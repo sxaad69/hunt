@@ -1,7 +1,8 @@
 """On-chain mcap + circulating top-10 gates. No network."""
 import struct
+import time
 
-from hunt.paper.onchain_intel import circulating_top10_pct, curve_fdv_sol, protocol_token_accounts
+from hunt.paper.onchain_intel import circulating_top10_pct, curve_fdv_sol, curve_fill_pct, protocol_token_accounts
 from hunt.paper.run import _entry_sol, _fdv_from_payload, survival_filter
 from hunt.utils.solanatracker import verdict_from_risk
 from hunt.watch.price_feed import Quote, amm_price_sol, parse_curve_quote, parse_spl_amount
@@ -20,6 +21,7 @@ def _coin(**kw):
         "market_cap": 80.0,
         "_intel_ok": True,
         "_top10": 40.0,
+        "_curve_pct": 60.0,
     }
     base.update(kw)
     return base
@@ -72,9 +74,11 @@ def test_filter_fail_closed_mcap_and_intel():
     ok, reason = survival_filter(_coin(market_cap=9000))
     assert not ok and reason.startswith("mcap_ceiling_")
     ok, reason = survival_filter(_coin(_graduated=True, market_cap=80))
-    assert ok, reason
+    assert not ok and reason.startswith("b_band_low_")
     ok, reason = survival_filter(_coin(_graduated=True, market_cap=9000))
     assert ok, reason
+    ok, reason = survival_filter(_coin(_graduated=True, market_cap=40000))
+    assert not ok and reason.startswith("b_band_high_")
     ok, reason = survival_filter(_coin(_graduated=True, market_cap=20))
     assert not ok and reason.startswith("dust_mcap_")
     ok, reason = survival_filter(_coin(_intel_ok=False))
@@ -91,6 +95,42 @@ def test_filter_does_not_trust_indexer_zeros():
 def test_filter_accepts_onchain_clean_curve():
     ok, reason = survival_filter(_coin())
     assert ok, reason
+
+
+def test_curve_fill_pct():
+    assert curve_fill_pct(real_sol_reserves=0) == 0.0
+    assert abs(curve_fill_pct(real_sol_reserves=42_500_000_000) - 50.0) < 0.01
+    assert abs(curve_fill_pct(real_sol_reserves=85_000_000_000) - 100.0) < 0.01
+    assert curve_fill_pct(virtual_sol_reserves=30_000_000_000) == 0.0
+    assert abs(curve_fill_pct(virtual_sol_reserves=72_500_000_000) - 50.0) < 0.01
+    assert curve_fill_pct() is None
+
+
+def test_starve_a_requires_curve_fill():
+    ok, reason = survival_filter(_coin(_curve_pct=20))
+    assert not ok and reason.startswith("curve_thin_")
+    ok, reason = survival_filter(_coin(_curve_pct=None))
+    assert (ok, reason) == (False, "curve_pct_unavailable")
+    ok, reason = survival_filter(_coin(_curve_pct=50))
+    assert ok, reason
+
+
+def test_b_band_starbucks_class():
+    ok, reason = survival_filter(_coin(_graduated=True, market_cap=14000))
+    assert ok, reason
+    ok, reason = survival_filter(_coin(_graduated=True, market_cap=2999))
+    assert not ok and reason.startswith("b_band_low_")
+
+
+def test_should_defer_thin_until_age_cap():
+    from hunt.paper.run import _should_defer
+    coin = {"created_timestamp": int(time.time() * 1000)}
+    assert _should_defer("curve_thin_12", coin)
+    assert _should_defer("curve_pct_unavailable", coin)
+    assert _should_defer("b_band_low_400", coin)
+    assert not _should_defer("b_band_high_40000", coin)
+    coin["created_timestamp"] = int((time.time() - 1300) * 1000)
+    assert not _should_defer("curve_thin_12", coin)
 
 
 def test_stale_api_timestamp_does_not_kill_live_curve():

@@ -80,7 +80,7 @@ def survival_filter(coin: dict) -> tuple[bool, str]:
             pass
     except: pass
     # 2b. MCAP: curve FDV or PumpSwap vault FDV. API market_cap is log-only.
-    # Curve (species-A): 50–3000 SOL. Graduated AMM (species-B): ≥50 SOL, no ceiling.
+    # Curve (species-A): 50–3000 SOL AND curve fill ≥50%. Graduated AMM (B): 3k–25k SOL.
     if not coin.get("_mcap_ok"):
         return False, "mcap_unavailable"
     try:
@@ -89,8 +89,22 @@ def survival_filter(coin: dict) -> tuple[bool, str]:
         return False, "mcap_unavailable"
     if mc < 50:
         return False, f"dust_mcap_{mc:.0f}"
-    if not coin.get("_graduated") and mc > MCAP_CEILING_SOL:
-        return False, f"mcap_ceiling_{mc:.0f}"
+    if coin.get("_graduated"):
+        if mc < B_BAND_LOW_SOL:
+            return False, f"b_band_low_{mc:.0f}"
+        if mc > B_BAND_HIGH_SOL:
+            return False, f"b_band_high_{mc:.0f}"
+    else:
+        if mc > MCAP_CEILING_SOL:
+            return False, f"mcap_ceiling_{mc:.0f}"
+        try:
+            fill = float(coin["_curve_pct"]) if coin.get("_curve_pct") is not None else None
+        except (TypeError, ValueError, KeyError):
+            fill = None
+        if fill is None:
+            return False, "curve_pct_unavailable"
+        if fill < CURVE_MIN_FILL_PCT:
+            return False, f"curve_thin_{fill:.0f}"
     # 2e. top-10 of CIRCULATING supply (curve ATA excluded). Indexer zeros are
     # not a pass. Missing measurement is a REJECT. Snipers are not gated here —
     # getTokenLargestAccounts cannot see them; indexer sniperCount is the same
@@ -173,8 +187,12 @@ TIER_TRIGGERS = [0.40, 0.60]
 TIER_FRACS = [0.50, 0.25]
 # (peak-multiple floor, trail-from-peak) — first matching row wins
 MOON_TRAIL_LADDER = [(0.0, 0.30), (3.0, 0.20), (10.0, 0.12), (50.0, 0.08)]
-MCAP_CEILING_SOL = 3000.0  # RE-ENABLED 2026-09-11 (operator order): ≤3000 SOL, species-A only
-                           # for the supervised live session; species-B stays out via mcap_ceiling.
+MCAP_CEILING_SOL = 3000.0
+CURVE_MIN_FILL_PCT = 50.0
+B_BAND_LOW_SOL = 3000.0
+B_BAND_HIGH_SOL = 25000.0
+CURVE_DEFER_MAX_AGE_S = 1200.0
+WAITLIST_RETRY_S = 20.0
 
 _NOTIFIER = None  # telegram alerts, started in run_paper
 _fx_ts = 0.0
@@ -439,6 +457,19 @@ async def _coin_intel(client: httpx.AsyncClient, mint: str) -> dict:
     return intel
 
 
+def _curve_fill_from_payload(coin: dict) -> float | None:
+    from hunt.paper.onchain_intel import curve_fill_pct
+    try:
+        real = coin.get("real_sol_reserves")
+        virt = coin.get("virtual_sol_reserves")
+        return curve_fill_pct(
+            int(real) if real is not None else None,
+            int(virt) if virt is not None else None,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def _fdv_from_payload(coin: dict) -> tuple[float | None, bool] | None:
     """FDV from /coins virtual reserves when present. Same formula as on-chain."""
     try:
@@ -455,13 +486,25 @@ def _fdv_from_payload(coin: dict) -> tuple[float | None, bool] | None:
         return None
 
 
-async def _onchain_mcap(client: httpx.AsyncClient, mint: str) -> tuple[float | None, bool] | None:
-    """On-chain curve FDV in SOL. None = unreadable. graduated=True → FDV is None."""
+async def _onchain_mcap(
+    client: httpx.AsyncClient, mint: str
+) -> tuple[float | None, bool, float | None] | None:
+    """On-chain (fdv_sol, graduated, fill_pct). None = unreadable."""
     try:
         from hunt.paper.onchain_intel import fetch_curve_mcap
         return await fetch_curve_mcap(client, get_settings().rpc_http, mint)
     except Exception:
         return None
+
+
+def _should_defer(reason: str, coin: dict) -> bool:
+    if not (reason.startswith("curve_thin") or reason == "curve_pct_unavailable"
+            or reason.startswith("b_band_low")):
+        return False
+    created = int(coin.get("created_timestamp") or 0) / 1000.0
+    if created <= 0:
+        return False
+    return (time.time() - created) < CURVE_DEFER_MAX_AGE_S
 
 
 async def _socials_for_new_mint(client: httpx.AsyncClient, mint: str) -> dict:
@@ -1014,10 +1057,10 @@ async def paper_stops_loop(stop_event: asyncio.Event):
 
 
 async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreener,
-                            stats: dict) -> None:
+                            stats: dict) -> str:
     """Full gate chain for one candidate: survival filter → smart-wallet boost →
     risk gate → paper open/reject. Shared by the ws discovery stream and the
-    safety-net poll."""
+    safety-net poll. Returns 'defer' to retry later, else 'done'."""
     mint = coin["mint"]
     symbol = coin.get("symbol") or "?"
     api_mc = 0.0
@@ -1026,13 +1069,22 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
     except (TypeError, ValueError):
         api_mc = 0.0
     got = _fdv_from_payload(coin)
-    if got is None:
-        got = await _onchain_mcap(client, mint)
+    fill = _curve_fill_from_payload(coin)
+    if got is None or (fill is None and not (got and got[1])):
+        on = await _onchain_mcap(client, mint)
+        if on is not None:
+            on_mc, on_grad, on_fill = on
+            if got is None:
+                got = (on_mc, on_grad)
+            if fill is None:
+                fill = on_fill
+    if fill is not None:
+        coin["_curve_pct"] = fill
     if got is None:
         coin["_mcap_ok"] = False
         logger.info("[MCAPRELI] {} {} api={:.0f} onchain=NO_CURVE/err", symbol, mint, api_mc)
     else:
-        on_mc, on_grad = got
+        on_mc, on_grad = got[0], got[1]
         if on_grad:
             coin["_graduated"] = True
             pool = coin.get("pool_address") or ""
@@ -1068,12 +1120,23 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
             logger.info("[MCAPRELI] {} {} api={:.0f} onchain={:.1f} SOL (api/onchain={:.1f}x)",
                         symbol, mint, api_mc, on_mc, ratio)
     mc_now = float(coin.get("market_cap") or 0)
-    playable = coin.get("_mcap_ok") and mc_now >= 50.0 and (
-        coin.get("_graduated") or mc_now <= MCAP_CEILING_SOL)
+    fill_now = coin.get("_curve_pct")
+    playable = bool(coin.get("_mcap_ok")) and mc_now >= 50.0 and (
+        (coin.get("_graduated") and B_BAND_LOW_SOL <= mc_now <= B_BAND_HIGH_SOL)
+        or (
+            not coin.get("_graduated")
+            and mc_now <= MCAP_CEILING_SOL
+            and fill_now is not None
+            and float(fill_now) >= CURVE_MIN_FILL_PCT
+        )
+    )
     if playable and not coin.get("_intel_ok"):
         intel = await _coin_intel(client, mint)
         coin.update(intel)
     accept, reason = survival_filter(coin)
+    if not accept and _should_defer(reason, coin):
+        logger.debug("DEFER {} {} ({})", mint[:8], symbol, reason)
+        return "defer"
     created_ts = int(coin.get("created_timestamp") or 0) // 1000
     now = int(time.time())
     dev = coin.get("_dev") or None
@@ -1110,7 +1173,7 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
         if is_smart and not accept:
             locked = reason.startswith((
                 "intel_unavailable", "mcap_unavailable", "top10_heavy", "graduated",
-                "snipers_", "rugged",
+                "snipers_", "rugged", "curve_thin", "curve_pct_unavailable", "b_band_",
             ))
             if not locked:
                 accept = True
@@ -1163,6 +1226,7 @@ async def _handle_candidate(coin: dict, client: httpx.AsyncClient, ds: DexScreen
             with open(p, "a") as f:
                 f.write(line + "\n")
         logger.info("REJECT {} {} ({})", mint[:8], symbol, reason)
+    return "done"
 
 
 async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
@@ -1292,8 +1356,10 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
             if len(waitlist) > 500:  # safety: oldest coins expire, keep newest
                 waitlist[:] = waitlist[-500:]
             # process coins that reached decision age
+            now_s = time.time()
             due = [c for c in waitlist
-                   if now_ms - int(c.get("created_timestamp") or 0) >= WAITLIST_MIN_AGE_S * 1000]
+                   if now_ms - int(c.get("created_timestamp") or 0) >= WAITLIST_MIN_AGE_S * 1000
+                   and now_s >= float(c.get("_next_check") or 0)]
             if do_safety:
                 try:
                     pages = await fetch_page(client, 0, "false"), await fetch_page(client, 0, "true")
@@ -1303,7 +1369,10 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
                             continue
                         seen.add(m)
                         stats["total_scanned"] += 1
-                        await _handle_candidate(c, client, ds_for_open, stats)
+                        st = await _handle_candidate(c, client, ds_for_open, stats)
+                        if st == "defer":
+                            c["_next_check"] = time.time() + WAITLIST_RETRY_S
+                            waitlist.append(c)
                 except Exception as e:
                     logger.debug("safety poll error {}", e)
             if due:
@@ -1335,7 +1404,7 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
                     # candidates; [3000, 100000] = Species-B observation
                     # (instant-mega launches — log-only, ceiling still vetoes)
                     mc = float(coin.get("market_cap") or 0)
-                    if 50.0 <= mc <= 100000.0:
+                    if 50.0 <= mc <= 100000.0 and coin.get("_burst") is None:
                         burst = {}
                         if FEED is not None:
                             q0 = FEED.stale_quote(coin["mint"], 1e9)
@@ -1350,7 +1419,10 @@ async def run_paper(duration_s: int = 3600, poll_interval_s: int = 30) -> dict:
                                 if q1.mcap_sol > 0:
                                     coin["market_cap"] = q1.mcap_sol
                         coin["_burst"] = json.dumps(burst) if burst else None
-                    await _handle_candidate(coin, client, ds_for_open, stats)
+                    st = await _handle_candidate(coin, client, ds_for_open, stats)
+                    if st == "defer":
+                        coin["_next_check"] = time.time() + WAITLIST_RETRY_S
+                        waitlist.append(coin)
                 except Exception as e:
                     logger.exception("candidate error: {}", e)
 

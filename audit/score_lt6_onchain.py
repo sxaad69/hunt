@@ -42,7 +42,7 @@ async def now_mcap(client, rpc, mint: str) -> tuple[float | None, bool]:
     got = await fetch_curve_mcap(client, rpc, mint)
     if got is None:
         return None, False
-    on_mc, on_grad = got
+    on_mc, on_grad = got[0], got[1]
     if not on_grad:
         return on_mc, False
     try:

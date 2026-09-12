@@ -95,6 +95,10 @@ def parse_supply_raw(rpc_result: dict | None) -> Optional[int]:
         return None
 
 
+VS0_SOL = 30.0
+GRAD_REAL_SOL = 85.0
+
+
 def curve_fdv_sol(
     virtual_sol_reserves: int,
     virtual_token_reserves: int,
@@ -110,18 +114,36 @@ def curve_fdv_sol(
     return (virtual_sol_reserves / 1e9) * (token_total_supply / virtual_token_reserves)
 
 
-async def fetch_curve_mcap(http_client, rpc_http: str, mint: str) -> tuple[Optional[float], bool]:
-    """Return (fdv_sol, graduated). fdv is None when unreadable or curve complete."""
+def curve_fill_pct(
+    real_sol_reserves: int | None = None,
+    virtual_sol_reserves: int | None = None,
+) -> Optional[float]:
+    """Bonding-curve fill 0–100. Prefer real SOL / 85; else virtual − 30 SOL."""
+    real_sol: float | None = None
+    if real_sol_reserves is not None:
+        real_sol = max(0.0, real_sol_reserves / 1e9)
+    elif virtual_sol_reserves is not None:
+        real_sol = max(0.0, virtual_sol_reserves / 1e9 - VS0_SOL)
+    else:
+        return None
+    return max(0.0, min(100.0, 100.0 * real_sol / GRAD_REAL_SOL))
+
+
+async def fetch_curve_mcap(
+    http_client, rpc_http: str, mint: str
+) -> tuple[Optional[float], bool, Optional[float]]:
+    """Return (fdv_sol, graduated, fill_pct). fdv is None when unreadable or complete."""
     from hunt.exec.pumpfun.bonding_curve import fetch_bonding_curve_state
     try:
         st = await fetch_bonding_curve_state(rpc_http, mint, http_client=http_client)
     except Exception:
-        return None, False
+        return None, False, None
+    fill = curve_fill_pct(st.real_sol_reserves, st.virtual_sol_reserves)
     if st.complete:
-        return None, True
+        return None, True, fill
     return curve_fdv_sol(
         st.virtual_sol_reserves, st.virtual_token_reserves, st.token_total_supply
-    ), False
+    ), False, fill
 
 
 async def fetch_amm_mcap(http_client, rpc_http: str, pool_address: str) -> Optional[float]:
